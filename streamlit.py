@@ -18,13 +18,14 @@ if 'qualities' not in st.session_state:
     st.session_state.nI = 32
     st.session_state.last_displayed = []
     st.session_state.pending_hybrid = []
+    st.session_state.likes = set()
 
 # --- API Access Keys --- #
 PEXELS_API_KEY = '1ySgrjZpx7gT5Hml4mfF3i6WbzXo1XYZcRBYv3zfRJsD3poUxGVNyFGs'
 
 # --- Image Scraper --- #
 def get_pexels_images(query_tags, num_images):
-    query = ", ".join(query_tags)
+    query = random.choice(query_tags)  # use one tag at a time for Pexels
     try:
         url = f"https://api.pexels.com/v1/search?query={query}&per_page={num_images}"
         headers = {"Authorization": PEXELS_API_KEY}
@@ -60,33 +61,8 @@ with st.sidebar:
     for q, score in top:
         st.write(f"**{q}**: {score:.2f}")
 
-if st.button("🔄 Refresh Images") or not st.session_state.last_displayed:
-    st.session_state.generation_count += 1
-    insert_weird = st.session_state.generation_count % 5 == 0
-    all_imgs = get_new_images(50)
-
-    if insert_weird:
-        top_qualities = sorted(st.session_state.quality_scores, key=st.session_state.quality_scores.get, reverse=True)[:10]
-        weird_image = next((img for img in all_imgs if not any(q in top_qualities for q in img['qualities'])), None)
-        selected_images = sorted(all_imgs, key=lambda img: sum(st.session_state.quality_scores[q] for q in img['qualities']), reverse=True)[:st.session_state.nI-1]
-        if weird_image:
-            selected_images.append(weird_image)
-    else:
-        selected_images = sorted(all_imgs, key=lambda img: sum(st.session_state.quality_scores[q] for q in img['qualities']), reverse=True)[:st.session_state.nI]
-
-    st.session_state.last_displayed = selected_images
-    st.session_state.interacted_images = []
-
-st.write("## Images")
-cols = st.columns(4)
-for idx, img in enumerate(st.session_state.last_displayed):
-    with cols[idx % 4]:
-        st.image(img['url'], caption=", ".join(img['qualities']), use_container_width=True)
-        if st.button(f"👍 Like", key=f"like-{img['id']}") and img not in st.session_state.interacted_images:
-            st.session_state.interacted_images.append(img)
-
-if st.button("✨ More please"):
-    interactions = st.session_state.interacted_images
+if st.button("🔄 Refresh / More Images") or not st.session_state.last_displayed:
+    interactions = list(st.session_state.likes)
     expected = int(st.session_state.nI * 0.4)
     if len(interactions) == expected:
         st.session_state.coins += 1
@@ -110,7 +86,33 @@ if st.button("✨ More please"):
         if q not in recently_used:
             st.session_state.quality_scores[q] *= st.session_state.decay_rate
 
-    st.session_state.last_displayed = []
+    st.session_state.generation_count += 1
+    insert_weird = st.session_state.generation_count % 5 == 0
+    all_imgs = get_new_images(50)
+
+    if insert_weird:
+        top_qualities = sorted(st.session_state.quality_scores, key=st.session_state.quality_scores.get, reverse=True)[:10]
+        weird_image = next((img for img in all_imgs if not any(q in top_qualities for q in img['qualities'])), None)
+        selected_images = sorted(all_imgs, key=lambda img: sum(st.session_state.quality_scores[q] for q in img['qualities']), reverse=True)[:st.session_state.nI-1]
+        if weird_image:
+            selected_images.append(weird_image)
+    else:
+        selected_images = sorted(all_imgs, key=lambda img: sum(st.session_state.quality_scores[q] for q in img['qualities']), reverse=True)[:st.session_state.nI]
+
+    st.session_state.last_displayed = selected_images
+    st.session_state.interacted_images = []
+    st.session_state.likes = set()
+
+st.write("## Images")
+cols = st.columns(4)
+for idx, img in enumerate(st.session_state.last_displayed):
+    with cols[idx % 4]:
+        st.image(img['url'], caption=", ".join(img['qualities']), use_container_width=True)
+        liked = st.checkbox("Like", key=f"like-{img['id']}")
+        if liked:
+            st.session_state.likes.add(img)
+        elif img in st.session_state.likes:
+            st.session_state.likes.remove(img)
 
 if st.session_state.coins >= st.session_state.background_cost:
     if st.button("🎨 Redeem Background"):
