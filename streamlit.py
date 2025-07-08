@@ -1,82 +1,31 @@
-import streamlit as st
-import random
-import requests
-from collections import defaultdict
+    url = "https://api.unsplash.com/search/photos"
+    params = {
+        'query': query,
+        'per_page': num_images,
+        'client_id': UNSPLASH_ACCESS_KEY
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    return [{"id": img['id'], "url": img['urls']['regular'], "qualities": [query]} for img in data.get('results', [])]
 
-# --- Initial Setup --- #
-if 'qualities' not in st.session_state:
-    st.session_state.qualities = set()
-    st.session_state.quality_scores = defaultdict(float)
-    st.session_state.quality_frequency = defaultdict(int)
-    st.session_state.image_history = []
-    st.session_state.interacted_images = []
-    st.session_state.ignored_images = defaultdict(int)
-    st.session_state.coins = 0
-    st.session_state.generation_count = 0
-    st.session_state.decay_rate = 0.95
-    st.session_state.background_cost = 5
-    st.session_state.nI = 32
-    st.session_state.last_displayed = []
-    st.session_state.pending_hybrid = []
-
-# --- API Access Keys --- #
-UNSPLASH_ACCESS_KEY = 'lYR5e42tHGOQEwaHBFg3F0A0EMSfd0LyaF37eZCGBPg'
-PEXELS_API_KEY = '1ySgrjZpx7gT5Hml4mfF3i6WbzXo1XYZcRBYv3zfRJsD3poUxGVNyFGs'
-
-# --- Image Scrapers --- #
-def get_unsplash_images(query_tags, num_images):
-    query = " ".join(query_tags)
-    try:
-        url = "https://api.unsplash.com/search/photos"
-        params = {
-            'query': query,
-            'per_page': num_images,
-            'client_id': UNSPLASH_ACCESS_KEY
-        }
-        response = requests.get(url, params=params)
-        data = response.json()
-        return [{"id": img['id'], "url": img['urls']['regular'], "qualities": query_tags} for img in data.get('results', [])]
-    except Exception as e:
-        st.warning(f"Unsplash error for '{query}': {e}")
-        return []
-
-def get_pexels_images(query_tags, num_images):
-    query = ", ".join(query_tags)
-    try:
-        url = f"https://api.pexels.com/v1/search?query={query}&per_page={num_images}"
-        headers = {"Authorization": PEXELS_API_KEY}
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        return [{"id": str(img['id']), "url": img['src']['medium'], "qualities": query_tags} for img in data.get('photos', [])]
-    except Exception as e:
-        st.warning(f"Pexels error for '{query}': {e}")
-        return []
+def get_pexels_images(query, num_images):
+    url = f"https://api.pexels.com/v1/search?query={query}&per_page={num_images}"
+    headers = {"Authorization": PEXELS_API_KEY}
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    return [{"id": str(img['id']), "url": img['src']['medium'], "qualities": [query]} for img in data.get('photos', [])]
 
 def get_new_images(num):
-    tag_pool = [
-        'sunset', 'robot', 'cyberpunk', 'vintage', 'macro', 'mountains', 'cats', 'dogs',
-        'sci-fi', 'neon', 'portrait', 'food', 'minimalist', 'graffiti', 'space',
-        'fantasy', 'surreal', 'cityscape', 'wildlife', 'pattern', 'texture', 'ocean', 'forest', 'desert', 'night'
-    ]
-
     images = []
-    for _ in range(num):
-        tag_combo = random.sample(tag_pool, k=random.randint(2, 3))
-        images.extend(get_unsplash_images(tag_combo, 1))
-        images.extend(get_pexels_images(tag_combo, 1))
-
+    while len(images) < num:
+        query = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
+        images.extend(get_pexels_images(query, 4))
     random.shuffle(images)
     return images[:num]
 
 # --- Main Streamlit App --- #
-st.title("🔼️ Image Preference Explorer")
+st.title("🖼️ Image Preference Explorer")
 st.write("Interact with images to shape your preferences.")
-
-with st.sidebar:
-    st.markdown("### 🔍 Your Top Preferences")
-    top = sorted(st.session_state.quality_scores.items(), key=lambda x: x[1], reverse=True)[:10]
-    for q, score in top:
-        st.write(f"**{q}**: {score:.2f}")
 
 if st.button("🔄 Refresh Images") or not st.session_state.last_displayed:
     st.session_state.generation_count += 1
@@ -100,16 +49,12 @@ cols = st.columns(4)
 for idx, img in enumerate(st.session_state.last_displayed):
     with cols[idx % 4]:
         st.image(img['url'], caption=", ".join(img['qualities']), use_container_width=True)
-        if st.button(f"👍 Like", key=f"like-{img['id']}") and img not in st.session_state.interacted_images:
+        if st.button(f"👍 Like", key=img['id']):
             st.session_state.interacted_images.append(img)
 
 if st.button("✨ More please"):
+    st.session_state.last_displayed = []
     interactions = st.session_state.interacted_images
-    expected = int(st.session_state.nI * 0.4)
-    if len(interactions) == expected:
-        st.session_state.coins += 1
-        st.success(f"🪙 Coin earned! Total coins: {st.session_state.coins}")
-
     st.session_state.image_history.extend(st.session_state.last_displayed)
 
     for img in interactions:
@@ -128,14 +73,14 @@ if st.button("✨ More please"):
         if q not in recently_used:
             st.session_state.quality_scores[q] *= st.session_state.decay_rate
 
-    st.session_state.last_displayed = []
+    expected = int(st.session_state.nI * 0.4)
+    if len(interactions) == expected:
+        st.session_state.coins += 1
+        st.success(f"🪙 Coin earned! Total coins: {st.session_state.coins}")
 
-if st.session_state.coins >= st.session_state.background_cost:
-    if st.button("🎨 Redeem Background"):
-        top_qualities = sorted(st.session_state.quality_scores, key=st.session_state.quality_scores.get, reverse=True)[:5]
-        st.balloons()
-        st.success(f"New background generated from: {top_qualities}")
-        example_images = get_unsplash_images(random.sample(top_qualities, k=2), 3)
-        for ex_img in example_images:
-            st.image(ex_img['url'], caption=", ".join(ex_img['qualities']), use_container_width=True)
-        st.session_state.coins -= st.session_state.background_cost
+    if st.session_state.coins >= st.session_state.background_cost:
+        if st.button("🎨 Redeem Background"):
+            top_qualities = sorted(st.session_state.quality_scores, key=st.session_state.quality_scores.get, reverse=True)[:5]
+            st.balloons()
+            st.success(f"New background generated from: {top_qualities}")
+            st.session_state.coins -= st.session_state.background_cost
