@@ -61,9 +61,11 @@ def get_new_images(num):
 
     images = []
     for _ in range(num):
-        tag_combo = random.sample(tag_pool, k=random.randint(2, 3))
-        images.extend(get_unsplash_images(tag_combo, 1))
-        images.extend(get_pexels_images(tag_combo, 1))
+        unsplash_tag = [random.choice(tag_pool)]  # Single tag for Unsplash
+        pexels_tags = random.sample(tag_pool, k=random.randint(2, 3))  # Multi-tag for Pexels
+
+        images.extend(get_unsplash_images(unsplash_tag, 1))
+        images.extend(get_pexels_images(pexels_tags, 1))
 
     random.shuffle(images)
     return images[:num]
