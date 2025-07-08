@@ -2,6 +2,7 @@ import streamlit as st
 import random
 import requests
 from collections import defaultdict
+from wordfreq import top_n_list
 
 # --- Initial Setup --- #
 if 'qualities' not in st.session_state:
@@ -53,7 +54,6 @@ def get_pexels_images(query_tags, num_images):
         return []
 
 def get_new_images(num):
-    from wordfreq import top_n_list
     tag_pool = top_n_list('en', 5000)  # Use top English words as a proxy for a dictionary
 
     images = []
