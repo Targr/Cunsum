@@ -25,7 +25,7 @@ PEXELS_API_KEY = '1ySgrjZpx7gT5Hml4mfF3i6WbzXo1XYZcRBYv3zfRJsD3poUxGVNyFGs'
 
 # --- Image Scrapers --- #
 def get_unsplash_images(query_tags, num_images):
-    query = " ".join(query_tags)
+    query = query_tags[0]  # Only use a single tag for Unsplash to avoid API issues
     try:
         url = "https://api.unsplash.com/search/photos"
         params = {
@@ -35,7 +35,7 @@ def get_unsplash_images(query_tags, num_images):
         }
         response = requests.get(url, params=params)
         data = response.json()
-        return [{"id": img['id'], "url": img['urls']['regular'], "qualities": query_tags} for img in data.get('results', [])]
+        return [{"id": img['id'], "url": img['urls']['regular'], "qualities": [query]} for img in data.get('results', [])]
     except Exception as e:
         st.warning(f"Unsplash error for '{query}': {e}")
         return []
@@ -53,17 +53,15 @@ def get_pexels_images(query_tags, num_images):
         return []
 
 def get_new_images(num):
-    tag_pool = [
-        'sunset', 'robot', 'cyberpunk', 'vintage', 'macro', 'mountains', 'cats', 'dogs',
-        'sci-fi', 'neon', 'portrait', 'food', 'minimalist', 'graffiti', 'space',
-        'fantasy', 'surreal', 'cityscape', 'wildlife', 'pattern', 'texture', 'ocean', 'forest', 'desert', 'night'
-    ]
+    from wordfreq import top_n_list
+    tag_pool = top_n_list('en', 5000)  # Use top English words as a proxy for a dictionary
 
     images = []
     for _ in range(num):
-        tag_combo = random.sample(tag_pool, k=random.randint(2, 3))
-        images.extend(get_unsplash_images(tag_combo, 1))
-        images.extend(get_pexels_images(tag_combo, 1))
+        pexels_tags = random.sample(tag_pool, k=random.randint(2, 3))
+        unsplash_tag = random.choice(tag_pool)
+        images.extend(get_unsplash_images([unsplash_tag], 1))
+        images.extend(get_pexels_images(pexels_tags, 1))
 
     random.shuffle(images)
     return images[:num]
