@@ -25,7 +25,7 @@ PEXELS_API_KEY = '1ySgrjZpx7gT5Hml4mfF3i6WbzXo1XYZcRBYv3zfRJsD3poUxGVNyFGs'
 
 # --- Image Scrapers --- #
 def get_unsplash_images(query_tags, num_images):
-    query = ", ".join(query_tags)
+    query = " ".join(query_tags)
     try:
         url = "https://api.unsplash.com/search/photos"
         params = {
