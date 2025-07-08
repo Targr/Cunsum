@@ -1,3 +1,32 @@
+# Streamlit version of the image preference discovery system
+
+import streamlit as st
+import random
+import requests
+from collections import defaultdict
+
+# --- Initial Setup --- #
+if 'qualities' not in st.session_state:
+    st.session_state.qualities = set()
+    st.session_state.quality_scores = defaultdict(float)
+    st.session_state.quality_frequency = defaultdict(int)
+    st.session_state.image_history = []
+    st.session_state.interacted_images = []
+    st.session_state.ignored_images = defaultdict(int)
+    st.session_state.coins = 0
+    st.session_state.generation_count = 0
+    st.session_state.decay_rate = 0.95
+    st.session_state.background_cost = 5
+    st.session_state.nI = 32
+    st.session_state.last_displayed = []
+    st.session_state.pending_hybrid = []
+
+# --- API Access Keys --- #
+UNSPLASH_ACCESS_KEY = 'lYR5e42tHGOQEwaHBFg3F0A0EMSfd0LyaF37eZCGBPg'
+PEXELS_API_KEY = '1ySgrjZpx7gT5Hml4mfF3i6WbzXo1XYZcRBYv3zfRJsD3poUxGVNyFGs'
+
+# --- Image Scrapers --- #
+def get_unsplash_images(query, num_images):
     url = "https://api.unsplash.com/search/photos"
     params = {
         'query': query,
@@ -16,10 +45,21 @@ def get_pexels_images(query, num_images):
     return [{"id": str(img['id']), "url": img['src']['medium'], "qualities": [query]} for img in data.get('photos', [])]
 
 def get_new_images(num):
+    # Use a large list of random search terms to diversify content
+    queries = [
+        'sunset', 'robot', 'cyberpunk', 'vintage', 'macro', 'mountains', 'cats', 'dogs',
+        'sci-fi', 'neon', 'portrait', 'food', 'minimalist', 'graffiti', 'space',
+        'fantasy', 'surreal', 'cityscape', 'wildlife', 'pattern', 'texture', 'ocean', 'forest', 'desert', 'night'
+    ]
+    random.shuffle(queries)
+    num_queries = max(1, num // 8)
+    selected_queries = queries[:num_queries]
+
     images = []
-    while len(images) < num:
-        query = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=5))
-        images.extend(get_pexels_images(query, 4))
+    for query in selected_queries:
+        images.extend(get_unsplash_images(query, 2))
+        images.extend(get_pexels_images(query, 2))
+
     random.shuffle(images)
     return images[:num]
 
