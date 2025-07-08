@@ -79,7 +79,8 @@ for idx, img in enumerate(st.session_state.last_displayed):
         if st.button(f"👍 Like", key=img['id']):
             st.session_state.interacted_images.append(img)
 
-if st.button("✅ Done Interacting"):
+if st.button("✨ More please"):
+    st.session_state.last_displayed = []
     interactions = st.session_state.interacted_images
     st.session_state.image_history.extend(st.session_state.last_displayed)
 
