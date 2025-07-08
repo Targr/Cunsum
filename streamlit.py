@@ -75,7 +75,7 @@ st.write("## Images")
 cols = st.columns(4)
 for idx, img in enumerate(st.session_state.last_displayed):
     with cols[idx % 4]:
-        st.image(img['url'], use_column_width=True)
+        st.image(img['url'], use_container_width=True)
         if st.button(f"👍 Like", key=img['id']):
             st.session_state.interacted_images.append(img)
 
