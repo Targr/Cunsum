@@ -1,25 +1,21 @@
-# Streamlit version of the image preference discovery system
+# This is a scaffold of the image preference discovery system in Python
 
-import streamlit as st
 import random
 import requests
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 # --- Initial Setup --- #
-if 'qualities' not in st.session_state:
-    st.session_state.qualities = set()
-    st.session_state.quality_scores = defaultdict(float)
-    st.session_state.quality_frequency = defaultdict(int)
-    st.session_state.image_history = []
-    st.session_state.interacted_images = []
-    st.session_state.ignored_images = defaultdict(int)
-    st.session_state.coins = 0
-    st.session_state.generation_count = 0
-    st.session_state.decay_rate = 0.95
-    st.session_state.background_cost = 5
-    st.session_state.nI = 32
-    st.session_state.last_displayed = []
-    st.session_state.pending_hybrid = []
+qualities = set()
+quality_scores = defaultdict(float)
+quality_frequency = defaultdict(int)
+image_history = []
+interacted_images = []
+ignored_images = defaultdict(int)
+coins = 0
+generation_count = 0
+decay_rate = 0.95
+background_cost = 5
+nI = 32  # Initial batch size, to be dynamically updated later
 
 # --- API Access Keys --- #
 UNSPLASH_ACCESS_KEY = 'lYR5e42tHGOQEwaHBFg3F0A0EMSfd0LyaF37eZCGBPg'
@@ -45,82 +41,77 @@ def get_pexels_images(query, num_images):
     return [{"id": str(img['id']), "url": img['src']['medium'], "qualities": [query]} for img in data.get('photos', [])]
 
 def get_new_images(num):
-    # Use a large list of random search terms to diversify content
-    queries = [
-        'sunset', 'robot', 'cyberpunk', 'vintage', 'macro', 'mountains', 'cats', 'dogs',
-        'sci-fi', 'neon', 'portrait', 'food', 'minimalist', 'graffiti', 'space',
-        'fantasy', 'surreal', 'cityscape', 'wildlife', 'pattern', 'texture', 'ocean', 'forest', 'desert', 'night'
-    ]
-    random.shuffle(queries)
-    num_queries = max(1, num // 8)
-    selected_queries = queries[:num_queries]
-
-    images = []
-    for query in selected_queries:
-        images.extend(get_unsplash_images(query, 2))
-        images.extend(get_pexels_images(query, 2))
-
-    random.shuffle(images)
+    queries = ['nature', 'abstract', 'animals', 'architecture', 'people']
+    query = random.choice(queries)
+    images = get_unsplash_images(query, num//2) + get_pexels_images(query, num//2)
     return images[:num]
 
-# --- Main Streamlit App --- #
-st.title("🖼️ Image Preference Explorer")
-st.write("Interact with images to shape your preferences.")
+# --- User Interaction --- #
+def show_images_to_user(images):
+    print("Showing images:")
+    for img in images:
+        print(f" - {img['url']} (Qualities: {img['qualities']})")
+    for img in images:
+        print(f" - {img['id']} (Qualities: {img['qualities']})")
 
-if st.button("🔄 Refresh Images") or not st.session_state.last_displayed:
-    st.session_state.generation_count += 1
-    insert_weird = st.session_state.generation_count % 5 == 0
-    all_imgs = get_new_images(50)
+def get_user_interactions(images):
+    return [img for img in images if random.random() < 0.4]  # Simulated 40% engagement
+
+def generate_background(preferred_qualities):
+    print(f"🎨 New background based on: {preferred_qualities}")
+
+# --- Main Loop --- #
+while True:
+    generation_count += 1
+    insert_weird = generation_count % 5 == 0
 
     if insert_weird:
-        top_qualities = sorted(st.session_state.quality_scores, key=st.session_state.quality_scores.get, reverse=True)[:10]
+        all_imgs = get_new_images(50)
+        top_qualities = sorted(quality_scores, key=quality_scores.get, reverse=True)[:10]
         weird_image = next((img for img in all_imgs if not any(q in top_qualities for q in img['qualities'])), None)
-        selected_images = sorted(all_imgs, key=lambda img: sum(st.session_state.quality_scores[q] for q in img['qualities']), reverse=True)[:st.session_state.nI-1]
+        selected_images = sorted(all_imgs, key=lambda img: sum(quality_scores[q] for q in img['qualities']), reverse=True)[:nI-1]
         if weird_image:
             selected_images.append(weird_image)
     else:
-        selected_images = sorted(all_imgs, key=lambda img: sum(st.session_state.quality_scores[q] for q in img['qualities']), reverse=True)[:st.session_state.nI]
+        all_imgs = get_new_images(50)
+        selected_images = sorted(all_imgs, key=lambda img: sum(quality_scores[q] for q in img['qualities']), reverse=True)[:nI]
 
-    st.session_state.last_displayed = selected_images
-    st.session_state.interacted_images = []
+    show_images_to_user(selected_images)
+    input("Press Enter after interacting...")
 
-st.write("## Images")
-cols = st.columns(4)
-for idx, img in enumerate(st.session_state.last_displayed):
-    with cols[idx % 4]:
-        st.image(img['url'], caption=", ".join(img['qualities']), use_container_width=True)
-        if st.button(f"👍 Like", key=img['id']):
-            st.session_state.interacted_images.append(img)
+    interactions = get_user_interactions(selected_images)
+    print(f"Interacted with {len(interactions)} / {len(selected_images)} images")
 
-if st.button("✨ More please"):
-    st.session_state.last_displayed = []
-    interactions = st.session_state.interacted_images
-    st.session_state.image_history.extend(st.session_state.last_displayed)
+    image_history.extend(selected_images)
+    interacted_images.extend(interactions)
 
     for img in interactions:
         for q in img['qualities']:
-            st.session_state.qualities.add(q)
-            st.session_state.quality_frequency[q] += 1
-            rarity = 1 / max(1, st.session_state.quality_frequency[q])
-            st.session_state.quality_scores[q] += 1.0 * rarity
+            qualities.add(q)
+            quality_frequency[q] += 1
+            rarity = 1 / max(1, quality_frequency[q])
+            quality_scores[q] += 1.0 * rarity
 
-    for img in st.session_state.last_displayed:
+    for img in selected_images:
         if img not in interactions:
-            st.session_state.ignored_images[img['id']] += 1
+            ignored_images[img['id']] += 1
 
     recently_used = {q for img in interactions for q in img['qualities']}
-    for q in st.session_state.quality_scores:
+    for q in quality_scores:
         if q not in recently_used:
-            st.session_state.quality_scores[q] *= st.session_state.decay_rate
+            quality_scores[q] *= decay_rate
 
-    expected = int(st.session_state.nI * 0.4)
+    expected = int(nI * 0.4)
     if len(interactions) == expected:
-        st.session_state.coins += 1
-        st.success(f"🪙 Coin earned! Total coins: {st.session_state.coins}")
+        coins += 1
+        print(f"🪙 Coin earned! Total coins: {coins}")
 
-    if st.session_state.coins >= st.session_state.background_cost:
-        if st.button("🎨 Redeem Background"):
-            top_qualities = sorted(st.session_state.quality_scores, key=st.session_state.quality_scores.get, reverse=True)[:5]
-            st.balloons()
-            st.success(f"New background generated from: {top_qualities}")
-            st.session_state.coins -= st.session_state.background_cost
+    if coins >= background_cost:
+        choice = input("Spend 5 coins on new background? (y/n): ").strip().lower()
+        if choice == 'y':
+            top_qualities = sorted(quality_scores, key=quality_scores.get, reverse=True)[:5]
+            generate_background(top_qualities)
+            coins -= background_cost
+
+    print("Press Enter for next round...")
+    input()
