@@ -51,7 +51,7 @@ def get_new_images(num):
     return images[:num]
 
 # --- Main Streamlit App --- #
-st.title("🖼️ Image Preference Explorer")
+st.title("CUNSÜM")
 st.write("Interact with images to shape your preferences.")
 
 if st.button("🔄 Refresh Images") or not st.session_state.last_displayed:
@@ -75,7 +75,7 @@ st.write("## Images")
 cols = st.columns(4)
 for idx, img in enumerate(st.session_state.last_displayed):
     with cols[idx % 4]:
-        st.image(img['url'], use_container_width=True)
+        st.image(img['url'], caption=", ".join(img['qualities']), use_container_width=True)
         if st.button(f"👍 Like", key=img['id']):
             st.session_state.interacted_images.append(img)
 
