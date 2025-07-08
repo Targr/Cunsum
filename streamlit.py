@@ -45,13 +45,26 @@ def get_pexels_images(query, num_images):
     return [{"id": str(img['id']), "url": img['src']['medium'], "qualities": [query]} for img in data.get('photos', [])]
 
 def get_new_images(num):
-    queries = ['nature', 'abstract', 'animals', 'architecture', 'people']
-    query = random.choice(queries)
-    images = get_unsplash_images(query, num//2) + get_pexels_images(query, num//2)
+    # Use a large list of random search terms to diversify content
+    queries = [
+        'sunset', 'robot', 'cyberpunk', 'vintage', 'macro', 'mountains', 'cats', 'dogs',
+        'sci-fi', 'neon', 'portrait', 'food', 'minimalist', 'graffiti', 'space',
+        'fantasy', 'surreal', 'cityscape', 'wildlife', 'pattern', 'texture', 'ocean', 'forest', 'desert', 'night'
+    ]
+    random.shuffle(queries)
+    num_queries = max(1, num // 8)
+    selected_queries = queries[:num_queries]
+
+    images = []
+    for query in selected_queries:
+        images.extend(get_unsplash_images(query, 2))
+        images.extend(get_pexels_images(query, 2))
+
+    random.shuffle(images)
     return images[:num]
 
 # --- Main Streamlit App --- #
-st.title("CUNSÜM")
+st.title("🖼️ Image Preference Explorer")
 st.write("Interact with images to shape your preferences.")
 
 if st.button("🔄 Refresh Images") or not st.session_state.last_displayed:
