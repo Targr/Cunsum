@@ -4,6 +4,9 @@ import requests
 from collections import defaultdict
 
 # --- Initial Setup --- #
+if 'likes' not in st.session_state:
+    st.session_state.likes = set()
+
 if 'qualities' not in st.session_state:
     st.session_state.qualities = set()
     st.session_state.quality_scores = defaultdict(float)
@@ -18,7 +21,6 @@ if 'qualities' not in st.session_state:
     st.session_state.nI = 32
     st.session_state.last_displayed = []
     st.session_state.pending_hybrid = []
-    st.session_state.likes = set()
 
 # --- API Access Keys --- #
 PEXELS_API_KEY = '1ySgrjZpx7gT5Hml4mfF3i6WbzXo1XYZcRBYv3zfRJsD3poUxGVNyFGs'
