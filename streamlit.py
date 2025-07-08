@@ -24,16 +24,21 @@ UNSPLASH_ACCESS_KEY = 'lYR5e42tHGOQEwaHBFg3F0A0EMSfd0LyaF37eZCGBPg'
 PEXELS_API_KEY = '1ySgrjZpx7gT5Hml4mfF3i6WbzXo1XYZcRBYv3zfRJsD3poUxGVNyFGs'
 
 # --- Image Scrapers --- #
-def get_unsplash_images(query, num_images):
-    url = "https://api.unsplash.com/search/photos"
-    params = {
-        'query': query,
-        'per_page': num_images,
-        'client_id': UNSPLASH_ACCESS_KEY
-    }
-    response = requests.get(url, params=params)
-    data = response.json()
-    return [{"id": img['id'], "url": img['urls']['regular'], "qualities": [query]} for img in data.get('results', [])]
+def get_unsplash_images(query_tags, num_images):
+    query = " ".join(query_tags)
+    try:
+        url = "https://api.unsplash.com/search/photos"
+        params = {
+            'query': query,
+            'per_page': num_images,
+            'client_id': UNSPLASH_ACCESS_KEY
+        }
+        response = requests.get(url, params=params)
+        data = response.json()
+        return [{"id": img['id'], "url": img['urls']['regular'], "qualities": query_tags} for img in data.get('results', [])]
+    except Exception as e:
+        st.warning(f"Unsplash error for '{query}': {e}")
+        return []
 
 def get_pexels_images(query_tags, num_images):
     query = ", ".join(query_tags)
@@ -56,7 +61,7 @@ def get_new_images(num):
 
     images = []
     for _ in range(num):
-        unsplash_tag = random.choice(tag_pool)  # Single tag for Unsplash
+        unsplash_tag = [random.choice(tag_pool)]  # Single tag for Unsplash
         pexels_tags = random.sample(tag_pool, k=random.randint(2, 3))  # Multi-tag for Pexels
 
         images.extend(get_unsplash_images(unsplash_tag, 1))
@@ -132,7 +137,7 @@ if st.session_state.coins >= st.session_state.background_cost:
         top_qualities = sorted(st.session_state.quality_scores, key=st.session_state.quality_scores.get, reverse=True)[:5]
         st.balloons()
         st.success(f"New background generated from: {top_qualities}")
-        example_images = get_unsplash_images(random.choice(top_qualities), 3)
+        example_images = get_unsplash_images(random.sample(top_qualities, k=2), 3)
         for ex_img in example_images:
             st.image(ex_img['url'], caption=", ".join(ex_img['qualities']), use_container_width=True)
         st.session_state.coins -= st.session_state.background_cost
