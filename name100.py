@@ -42,7 +42,6 @@ LEADERBOARD_FILE = "leaderboard.csv"
 
 # Stats function
 @st.cache_data
-
 def load_leaderboard():
     try:
         return pd.read_csv(LEADERBOARD_FILE)
@@ -64,10 +63,13 @@ else:
     st.title("Name 100 Women")
     col1, col2 = st.columns([3, 1])
 
-    current_time = time.perf_counter()
-    elapsed_time = current_time - st.session_state.start_time
-
-    col2.metric("Time", f"{elapsed_time:.3f} sec")
+    # Real-time timer update using autorefresh
+    st_autorefresh = st.empty()
+    with st_autorefresh.container():
+        current_time = time.perf_counter()
+        elapsed_time = current_time - st.session_state.start_time
+        col2.metric("Time", f"{elapsed_time:.3f} sec")
+        st.rerun()
 
     # Display entered names to avoid duplicates
     with st.expander("Names you've already entered"):
