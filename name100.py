@@ -12,8 +12,9 @@ if 'started' not in st.session_state:
     st.session_state.start_time = 0.0
     st.session_state.end_time = 0.0
     st.session_state.times_up = False
+    st.session_state.entered_names = set()
 
-# Function to validate name with Wikidata
+# Function to validate name with Wikidata and check if they are women
 @st.cache_data(show_spinner=False)
 def validate_name(name):
     if not name.strip():
@@ -23,8 +24,17 @@ def validate_name(name):
     if r.status_code == 200:
         results = r.json().get('search', [])
         for result in results:
-            if 'label' in result and result['label'].lower() == name.lower():
-                return True
+            qid = result.get('id')
+            if qid:
+                entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
+                entity_data = requests.get(entity_url).json()
+                claims = entity_data['entities'][qid]['claims']
+                # P21 is 'sex or gender', Q6581072 is 'female'
+                if 'P21' in claims:
+                    for gender_claim in claims['P21']:
+                        gender_id = gender_claim['mainsnak']['datavalue']['value']['id']
+                        if gender_id == 'Q6581072':
+                            return True
     return False
 
 # Leaderboard
@@ -59,18 +69,25 @@ else:
 
     col2.metric("Time", f"{elapsed_time:.3f} sec")
 
+    # Display entered names to avoid duplicates
+    with st.expander("Names you've already entered"):
+        st.write(list(st.session_state.entered_names))
+
     # Entry input
     with col1:
         name_input = st.text_input(f"Enter name #{st.session_state.current_index + 1}", key=f"name_{st.session_state.current_index}")
 
     if name_input and st.session_state.current_index < 100:
-        if st.session_state.names[st.session_state.current_index] != name_input:
+        if name_input in st.session_state.entered_names:
+            st.warning("You've already entered that name. Try a new one.")
+        elif st.session_state.names[st.session_state.current_index] != name_input:
             if validate_name(name_input):
                 st.session_state.names[st.session_state.current_index] = name_input
+                st.session_state.entered_names.add(name_input)
                 st.session_state.current_index += 1
                 st.rerun()
             else:
-                st.warning("Name not found on Wikidata. Try again.")
+                st.warning("Name not found as a woman on Wikidata. Try again.")
 
     if st.session_state.current_index >= 100 and not st.session_state.times_up:
         st.session_state.end_time = time.perf_counter()
