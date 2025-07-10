@@ -63,21 +63,25 @@ else:
     st.title("Name 100 Women")
     col1, col2 = st.columns([3, 1])
 
-    # Real-time timer update using autorefresh
-    st_autorefresh = st.empty()
-    with st_autorefresh.container():
-        current_time = time.perf_counter()
-        elapsed_time = current_time - st.session_state.start_time
-        col2.metric("Time", f"{elapsed_time:.3f} sec")
-        st.rerun()
+    current_time = time.perf_counter()
+    elapsed_time = current_time - st.session_state.start_time
+    col2.metric("Time", f"{elapsed_time:.3f} sec")
 
     # Display entered names to avoid duplicates
     with st.expander("Names you've already entered"):
         st.write(list(st.session_state.entered_names))
 
     # Entry input
+    name_key = f"name_{st.session_state.current_index}"
+    if f"_focus_{name_key}" not in st.session_state:
+        st.session_state[f"_focus_{name_key}"] = True
+
     with col1:
-        name_input = st.text_input(f"Enter name #{st.session_state.current_index + 1}", key=f"name_{st.session_state.current_index}")
+        name_input = st.text_input(
+            f"Enter name #{st.session_state.current_index + 1}",
+            key=name_key,
+            label_visibility="visible",
+        )
 
     if name_input and st.session_state.current_index < 100:
         if name_input in st.session_state.entered_names:
@@ -87,6 +91,7 @@ else:
                 st.session_state.names[st.session_state.current_index] = name_input
                 st.session_state.entered_names.add(name_input)
                 st.session_state.current_index += 1
+                st.session_state[f"_focus_name_{st.session_state.current_index}"] = True
                 st.rerun()
             else:
                 st.warning("Name not found as a woman on Wikidata. Try again.")
