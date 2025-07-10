@@ -3,9 +3,8 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime
-import streamlit.components.v1 as components
 
-
+# App state
 if 'started' not in st.session_state:
     st.session_state.started = False
     st.session_state.names = [""] * 100
@@ -15,7 +14,7 @@ if 'started' not in st.session_state:
     st.session_state.times_up = False
     st.session_state.entered_names = set()
 
-# woman check
+# Function to validate name with Wikidata and check if they are women
 @st.cache_data(show_spinner=False)
 def validate_name(name):
     if not name.strip():
@@ -38,7 +37,7 @@ def validate_name(name):
                             return True
     return False
 
-# leaderboard 
+# Leaderboard
 LEADERBOARD_FILE = "leaderboard.csv"
 
 # Stats function
@@ -53,7 +52,7 @@ leaderboard = load_leaderboard()
 
 st.set_page_config(page_title="Name 100 Women", layout="centered")
 
-#  logic
+# Main logic
 if not st.session_state.started:
     st.title("Can you name 100 women?")
     if st.button("Yes"):
@@ -72,21 +71,17 @@ else:
     with st.expander("Names you've already entered"):
         st.write(list(st.session_state.entered_names))
 
-    #  input
-    name_key = "name_input_box"
+    # Entry input
+    name_key = f"name_{st.session_state.current_index}"
+    if f"_focus_{name_key}" not in st.session_state:
+        st.session_state[f"_focus_{name_key}"] = True
+
     with col1:
         name_input = st.text_input(
             f"Enter name #{st.session_state.current_index + 1}",
             key=name_key,
-            label_visibility="visible"
+            label_visibility="visible",
         )
-        # Focus JS
-        components.html(f"""
-            <script>
-                const input = window.parent.document.querySelector('input[data-testid="stTextInput"]');
-                if (input) {{ input.focus(); }}
-            </script>
-        """, height=0)
 
     if name_input and st.session_state.current_index < 100:
         if name_input in st.session_state.entered_names:
@@ -96,7 +91,7 @@ else:
                 st.session_state.names[st.session_state.current_index] = name_input
                 st.session_state.entered_names.add(name_input)
                 st.session_state.current_index += 1
-                st.session_state[name_key] = ""
+                st.session_state[f"_focus_name_{st.session_state.current_index}"] = True
                 st.rerun()
             else:
                 st.warning("Name not found as a woman on Wikidata. Try again.")
