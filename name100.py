@@ -49,7 +49,7 @@ if not st.session_state.started:
     if st.button("Yes"):
         st.session_state.started = True
         st.session_state.start_time = time.perf_counter()
-        st.experimental_rerun()
+        st.rerun()
 else:
     st.title("Name 100 Women")
     col1, col2 = st.columns([3, 1])
@@ -68,7 +68,7 @@ else:
             if validate_name(name_input):
                 st.session_state.names[st.session_state.current_index] = name_input
                 st.session_state.current_index += 1
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.warning("Name not found on Wikidata. Try again.")
 
