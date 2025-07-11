@@ -4,6 +4,9 @@ import requests
 import pandas as pd
 from datetime import datetime
 import os
+import inflect
+
+p = inflect.engine()
 
 # App state
 if 'started' not in st.session_state:
@@ -18,10 +21,17 @@ if 'started' not in st.session_state:
     st.session_state.target_count = 0
     st.session_state.valid_targets = set()
 
+# Normalize strings
+def normalize(text):
+    return p.singular_noun(text.lower().strip()) or text.lower().strip()
+
 # Validate name dynamically based on category
 @st.cache_data(show_spinner=False)
 def validate_name_against_category(name, category):
-    if not name.strip():
+    name = normalize(name)
+    category = normalize(category)
+
+    if not name:
         return False
 
     search_url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={name}&language=en&format=json"
@@ -38,20 +48,26 @@ def validate_name_against_category(name, category):
         entity_data = requests.get(entity_url).json()
         claims = entity_data['entities'][qid].get('claims', {})
 
+        # Ignore disambiguation pages
+        if 'P31' in claims:
+            if any(c['mainsnak'].get('datavalue', {}).get('value', {}).get('id') == 'Q4167410' for c in claims['P31']):
+                continue
+
         # Special case for women
-        if category.strip().lower() == 'women':
+        if category == 'women':
             if 'P21' in claims:
                 for gender_claim in claims['P21']:
-                    gender_id = gender_claim['mainsnak']['datavalue']['value']['id']
-                    if gender_id in ['Q6581072', 'Q1052281']:  # female or transgender female
-                        return True
-
+                    try:
+                        gender_id = gender_claim['mainsnak']['datavalue']['value']['id']
+                        if gender_id in ['Q6581072', 'Q1052281']:
+                            return True
+                    except (KeyError, TypeError):
+                        continue
         else:
             cat_search = requests.get(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category}&language=en&format=json&type=item").json()
             if not cat_search['search']:
                 return False
             cat_qid = cat_search['search'][0]['id']
-            # Match P31 or any P279 ancestry
             if 'P31' in claims:
                 for inst in claims['P31']:
                     if inst['mainsnak'].get('datavalue'):
@@ -117,13 +133,13 @@ else:
         )
 
     if name_input and st.session_state.current_index < st.session_state.target_count:
-        lower_input = name_input.strip().lower()
-        if lower_input in st.session_state.entered_names:
+        norm_input = normalize(name_input)
+        if norm_input in st.session_state.entered_names:
             st.warning("You've already entered that. Try a new one.")
         elif st.session_state.names[st.session_state.current_index] != name_input:
             if validate_name_against_category(name_input, st.session_state.category):
                 st.session_state.names[st.session_state.current_index] = name_input
-                st.session_state.entered_names.add(lower_input)
+                st.session_state.entered_names.add(norm_input)
                 st.session_state.current_index += 1
                 st.session_state[f"_focus_name_{st.session_state.current_index}"] = True
                 st.rerun()
