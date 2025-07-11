@@ -18,7 +18,7 @@ if 'started' not in st.session_state:
     st.session_state.target_count = 0
     st.session_state.valid_targets = set()
 
-# Wikidata category search using subclass matching
+# Wikidata category search using subclass or gender matching
 @st.cache_data(show_spinner=False)
 def get_entities_in_category(category_name):
     url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category_name}&language=en&format=json&type=item"
@@ -27,12 +27,24 @@ def get_entities_in_category(category_name):
         return []
 
     qid = search_res['search'][0]['id']
-    sparql = f"""
-    SELECT ?itemLabel WHERE {{
-      ?item wdt:P31/wdt:P279* wd:{qid} .
-      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" }}
-    }} LIMIT 1000
-    """
+
+    # Handle special case: 'women'
+    if category_name.strip().lower() == 'women':
+        sparql = f"""
+        SELECT ?itemLabel WHERE {{
+          ?item wdt:P21 ?gender .
+          FILTER(?gender IN (wd:Q6581072, wd:Q1052281))
+          SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" }}
+        }} LIMIT 1000
+        """
+    else:
+        sparql = f"""
+        SELECT ?itemLabel WHERE {{
+          ?item wdt:P31/wdt:P279* wd:{qid} .
+          SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" }}
+        }} LIMIT 1000
+        """
+
     endpoint = "https://query.wikidata.org/sparql"
     headers = {"Accept": "application/json"}
     r = requests.get(endpoint, params={"query": sparql}, headers=headers)
@@ -51,7 +63,7 @@ st.set_page_config(page_title="Name That Thing!", layout="centered")
 
 if not st.session_state.started:
     st.title("Create Your Naming Challenge")
-    st.session_state.category = st.text_input("What do you want to name? (e.g., mammals, U.S. presidents, Olympic sports)")
+    st.session_state.category = st.text_input("What do you want to name? (e.g., mammals, women, Olympic sports)")
     st.session_state.target_count = st.number_input("How many do you want to name?", min_value=1, max_value=100, step=1)
     if st.button("Start Game"):
         entities = get_entities_in_category(st.session_state.category)
