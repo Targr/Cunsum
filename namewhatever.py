@@ -18,38 +18,60 @@ if 'started' not in st.session_state:
     st.session_state.target_count = 0
     st.session_state.valid_targets = set()
 
-# Wikidata category search using subclass or gender matching
+# Validate name dynamically based on category
 @st.cache_data(show_spinner=False)
-def get_entities_in_category(category_name):
-    url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category_name}&language=en&format=json&type=item"
-    search_res = requests.get(url).json()
-    if not search_res['search']:
-        return []
+def validate_name_against_category(name, category):
+    if not name.strip():
+        return False
 
-    qid = search_res['search'][0]['id']
+    search_url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={name}&language=en&format=json"
+    response = requests.get(search_url)
+    if response.status_code != 200:
+        return False
+    results = response.json().get("search", [])
 
-    # Handle special case: 'women'
-    if category_name.strip().lower() == 'women':
-        sparql = f"""
-        SELECT ?itemLabel WHERE {{
-          ?item wdt:P21 ?gender .
-          FILTER(?gender IN (wd:Q6581072, wd:Q1052281))
-          SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" }}
-        }} LIMIT 1000
-        """
-    else:
-        sparql = f"""
-        SELECT ?itemLabel WHERE {{
-          ?item wdt:P31/wdt:P279* wd:{qid} .
-          SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" }}
-        }} LIMIT 1000
-        """
+    for result in results:
+        qid = result.get("id")
+        if not qid:
+            continue
+        entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
+        entity_data = requests.get(entity_url).json()
+        claims = entity_data['entities'][qid].get('claims', {})
 
+        # Special case for women
+        if category.strip().lower() == 'women':
+            if 'P21' in claims:
+                for gender_claim in claims['P21']:
+                    gender_id = gender_claim['mainsnak']['datavalue']['value']['id']
+                    if gender_id in ['Q6581072', 'Q1052281']:  # female or transgender female
+                        return True
+
+        else:
+            cat_search = requests.get(f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category}&language=en&format=json&type=item").json()
+            if not cat_search['search']:
+                return False
+            cat_qid = cat_search['search'][0]['id']
+            # Match P31 or any P279 ancestry
+            if 'P31' in claims:
+                for inst in claims['P31']:
+                    if inst['mainsnak'].get('datavalue'):
+                        inst_id = inst['mainsnak']['datavalue']['value']['id']
+                        if check_subclass_or_equal(inst_id, cat_qid):
+                            return True
+    return False
+
+# Check subclass relationship
+@st.cache_data(show_spinner=False)
+def check_subclass_or_equal(child_id, parent_id):
+    sparql = f"""
+    ASK {{
+      wd:{child_id} wdt:P279* wd:{parent_id} .
+    }}
+    """
     endpoint = "https://query.wikidata.org/sparql"
-    headers = {"Accept": "application/json"}
-    r = requests.get(endpoint, params={"query": sparql}, headers=headers)
-    data = r.json()
-    return [res['itemLabel']['value'] for res in data['results']['bindings']]
+    headers = {"Accept": "application/sparql-results+json"}
+    response = requests.get(endpoint, params={"query": sparql}, headers=headers)
+    return response.json().get("boolean", False)
 
 # Load leaderboard from file
 def load_leaderboard():
@@ -65,18 +87,13 @@ if not st.session_state.started:
     st.title("Create Your Naming Challenge")
     st.session_state.category = st.text_input("What do you want to name? (e.g., mammals, women, Olympic sports)")
     st.session_state.target_count = st.number_input("How many do you want to name?", min_value=1, max_value=100, step=1)
-    if st.button("Start Game"):
-        entities = get_entities_in_category(st.session_state.category)
-        if not entities:
-            st.error("Could not find that category. Try a different one.")
-        else:
-            st.session_state.valid_targets = set(e.lower() for e in entities)
-            st.session_state.names = [""] * st.session_state.target_count
-            st.session_state.entered_names = set()
-            st.session_state.current_index = 0
-            st.session_state.start_time = time.perf_counter()
-            st.session_state.started = True
-            st.rerun()
+    if st.button("Start Game") and st.session_state.category:
+        st.session_state.names = [""] * st.session_state.target_count
+        st.session_state.entered_names = set()
+        st.session_state.current_index = 0
+        st.session_state.start_time = time.perf_counter()
+        st.session_state.started = True
+        st.rerun()
 else:
     st.title(f"Name {st.session_state.target_count} Things from: {st.session_state.category}")
     col1, col2 = st.columns([3, 1])
@@ -103,14 +120,15 @@ else:
         lower_input = name_input.strip().lower()
         if lower_input in st.session_state.entered_names:
             st.warning("You've already entered that. Try a new one.")
-        elif lower_input in st.session_state.valid_targets:
-            st.session_state.names[st.session_state.current_index] = name_input.strip()
-            st.session_state.entered_names.add(lower_input)
-            st.session_state.current_index += 1
-            st.session_state[f"_focus_name_{st.session_state.current_index}"] = True
-            st.rerun()
-        else:
-            st.warning("That doesn't match anything in the category list.")
+        elif st.session_state.names[st.session_state.current_index] != name_input:
+            if validate_name_against_category(name_input, st.session_state.category):
+                st.session_state.names[st.session_state.current_index] = name_input
+                st.session_state.entered_names.add(lower_input)
+                st.session_state.current_index += 1
+                st.session_state[f"_focus_name_{st.session_state.current_index}"] = True
+                st.rerun()
+            else:
+                st.warning("That doesn't match the category on Wikidata. Try again.")
 
     if st.session_state.current_index >= st.session_state.target_count and not st.session_state.times_up:
         st.session_state.end_time = time.perf_counter()
