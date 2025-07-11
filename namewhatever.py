@@ -3,6 +3,7 @@ import time
 import requests
 import pandas as pd
 from datetime import datetime
+import os
 
 # App state
 if 'started' not in st.session_state:
@@ -17,7 +18,7 @@ if 'started' not in st.session_state:
     st.session_state.target_count = 0
     st.session_state.valid_targets = set()
 
-# Wikidata category search
+# Wikidata category search using subclass matching
 @st.cache_data(show_spinner=False)
 def get_entities_in_category(category_name):
     url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category_name}&language=en&format=json&type=item"
@@ -28,7 +29,7 @@ def get_entities_in_category(category_name):
     qid = search_res['search'][0]['id']
     sparql = f"""
     SELECT ?itemLabel WHERE {{
-      ?item wdt:P31 wd:{qid} .
+      ?item wdt:P31/wdt:P279* wd:{qid} .
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" }}
     }} LIMIT 1000
     """
@@ -38,12 +39,19 @@ def get_entities_in_category(category_name):
     data = r.json()
     return [res['itemLabel']['value'] for res in data['results']['bindings']]
 
+# Load leaderboard from file
+def load_leaderboard():
+    if os.path.exists("leaderboard.csv"):
+        return pd.read_csv("leaderboard.csv")
+    else:
+        return pd.DataFrame(columns=["username", "email", "time", "timestamp", "names"])
+
 # Game start screen
 st.set_page_config(page_title="Name That Thing!", layout="centered")
 
 if not st.session_state.started:
     st.title("Create Your Naming Challenge")
-    st.session_state.category = st.text_input("What do you want to name? (e.g., countries in Africa, U.S. presidents, Olympic sports)")
+    st.session_state.category = st.text_input("What do you want to name? (e.g., mammals, U.S. presidents, Olympic sports)")
     st.session_state.target_count = st.number_input("How many do you want to name?", min_value=1, max_value=100, step=1)
     if st.button("Start Game"):
         entities = get_entities_in_category(st.session_state.category)
