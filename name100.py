@@ -29,11 +29,11 @@ def validate_name(name):
                 entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
                 entity_data = requests.get(entity_url).json()
                 claims = entity_data['entities'][qid]['claims']
-                # P21 is 'sex or gender', Q6581072 is 'female'
+                # P21 is 'sex or gender'; include cis and trans women
                 if 'P21' in claims:
                     for gender_claim in claims['P21']:
                         gender_id = gender_claim['mainsnak']['datavalue']['value']['id']
-                        if gender_id == 'Q6581072':
+                        if gender_id in ['Q6581072', 'Q1052281']:  # female or transgender female
                             return True
     return False
 
