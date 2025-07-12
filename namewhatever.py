@@ -1,4 +1,4 @@
-# Improved Streamlit Naming Challenge Game with Robust Error Handling
+# Improved Streamlit Naming Challenge Game with Robust Error Handling and Category Autocomplete
 import streamlit as st
 import time
 import requests
@@ -30,6 +30,19 @@ def normalize(text):
 
 def is_valid_email(email):
     return re.match(r"[^@]+@[^@]+\.[^@]+", email)
+
+@st.cache_data(show_spinner=False)
+def get_category_suggestions(partial):
+    try:
+        response = requests.get(
+            f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={partial}&language=en&format=json&type=item"
+        )
+        systime.sleep(0.2)
+        if response.status_code != 200:
+            return []
+        return [item['label'] for item in response.json().get('search', []) if 'label' in item]
+    except:
+        return []
 
 @st.cache_data(show_spinner=False)
 def get_category_qid(category):
@@ -99,11 +112,9 @@ def validate_name_against_category(name, category, cat_qid):
             try:
                 entity_data = entity_resp.json()
             except Exception as e:
-                st.error(f"JSON decode failed for entity {qid}: {e}")
                 continue
             claims = entity_data['entities'][qid].get('claims', {})
         except Exception as e:
-            st.error(f"Entity data fetch failed for {name}: {e}")
             continue
 
         if 'P31' in claims:
@@ -148,7 +159,12 @@ if st.button("Restart Game"):
 # --- Game Logic --- #
 if not st.session_state.started:
     st.title("Create Your Naming Challenge")
-    st.session_state.category = st.text_input("What do you want to name? (e.g., mammals, women, Olympic sports)")
+
+    typed_cat = st.text_input("Start typing a category...")
+    suggestions = get_category_suggestions(typed_cat) if typed_cat else []
+    selected_cat = st.selectbox("Choose a matching category:", suggestions, index=0 if suggestions else None, key="cat_select")
+    st.session_state.category = selected_cat if selected_cat else ""
+
     st.session_state.target_count = st.number_input("How many do you want to name?", min_value=1, max_value=100, step=1)
 
     if st.button("Start Game") and st.session_state.category:
