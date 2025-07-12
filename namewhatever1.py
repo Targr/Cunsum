@@ -104,6 +104,16 @@ def fetch_valid_category_members(category):
 def validate_name(name, category):
     if not name.strip():
         return False
+    url = f"https://en.wikipedia.org/w/api.php?action=query&prop=categories&format=json&titles={name}"
+    r = requests.get(url)
+    if r.status_code == 200:
+        pages = r.json().get("query", {}).get("pages", {})
+        for page in pages.values():
+            categories = [c['title'].replace("Category:", "").lower() for c in page.get("categories", [])]
+            for cat in categories:
+                if category.lower() in cat or cat in category.lower():
+                    return True
+    return False
     url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={name}&language=en&format=json"
     r = requests.get(url)
     if r.status_code == 200:
