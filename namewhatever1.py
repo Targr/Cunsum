@@ -225,10 +225,11 @@ else:
     with st.expander("Names you've already entered"):
         st.write(list(st.session_state.entered_names))
 
-    with st.expander("See all possible valid names"):
+with st.expander("See all possible valid names"):
     for name in st.session_state.valid_members[:100]:  # only show first 100 for performance
         wiki_url = f"https://en.wikipedia.org/wiki/{name.replace(' ', '_')}"
         st.markdown(f"- [{name}]({wiki_url})", unsafe_allow_html=True)
+
 
     name_key = f"name_{st.session_state.current_index}"
     if f"_focus_{name_key}" not in st.session_state:
