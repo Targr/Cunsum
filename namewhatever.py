@@ -1,4 +1,4 @@
-# Improved Streamlit Naming Challenge Game
+# Improved Streamlit Naming Challenge Game with Error Handling
 import streamlit as st
 import time
 import requests
@@ -33,48 +33,67 @@ def is_valid_email(email):
 
 @st.cache_data(show_spinner=False)
 def get_category_qid(category):
-    search = requests.get(
-        f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category}&language=en&format=json&type=item"
-    ).json()
-    if search['search']:
-        return search['search'][0]['id']
+    try:
+        search = requests.get(
+            f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category}&language=en&format=json&type=item"
+        ).json()
+        if search['search']:
+            return search['search'][0]['id']
+    except Exception as e:
+        st.error(f"Category lookup failed: {e}")
     return None
 
 @st.cache_data(show_spinner=False)
 def check_subclass_or_equal(child_id, parent_id):
-    sparql = f"""
-    ASK {{
-      wd:{child_id} wdt:P279* wd:{parent_id} .
-    }}
-    """
-    endpoint = "https://query.wikidata.org/sparql"
-    headers = {"Accept": "application/sparql-results+json"}
-    response = requests.get(endpoint, params={"query": sparql}, headers=headers)
-    return response.json().get("boolean", False)
+    try:
+        sparql = f"""
+        ASK {{
+          wd:{child_id} wdt:P279* wd:{parent_id} .
+        }}
+        """
+        endpoint = "https://query.wikidata.org/sparql"
+        headers = {"Accept": "application/sparql-results+json"}
+        response = requests.get(endpoint, params={"query": sparql}, headers=headers)
+        return response.json().get("boolean", False)
+    except Exception as e:
+        st.error(f"Subclass check failed: {e}")
+        return False
 
 @st.cache_data(show_spinner=False)
 def validate_name_against_category(name, category, cat_qid):
     name = normalize(name)
     category = normalize(category)
-    
+
     if not name or not cat_qid:
         return False
 
-    search_url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={name}&language=en&format=json"
-    response = requests.get(search_url)
-    systime.sleep(0.2)  # Avoid rate limit
-    if response.status_code != 200:
+    try:
+        search_url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={name}&language=en&format=json"
+        response = requests.get(search_url)
+        systime.sleep(0.2)
+        if response.status_code != 200:
+            return False
+        results = response.json().get("search", [])
+    except Exception as e:
+        st.error(f"Search failed: {e}")
         return False
-    results = response.json().get("search", [])
 
     for result in results:
         qid = result.get("id")
         if not qid:
             continue
-        entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
-        entity_data = requests.get(entity_url).json()
-        systime.sleep(0.2)
-        claims = entity_data['entities'][qid].get('claims', {})
+
+        try:
+            entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
+            entity_resp = requests.get(entity_url)
+            systime.sleep(0.2)
+            if entity_resp.status_code != 200:
+                continue
+            entity_data = entity_resp.json()
+            claims = entity_data['entities'][qid].get('claims', {})
+        except Exception as e:
+            st.error(f"Entity data fetch failed for {name}: {e}")
+            continue
 
         if 'P31' in claims:
             if any(c['mainsnak'].get('datavalue', {}).get('value', {}).get('id') == 'Q4167410' for c in claims['P31']):
@@ -120,7 +139,7 @@ if not st.session_state.started:
     st.title("Create Your Naming Challenge")
     st.session_state.category = st.text_input("What do you want to name? (e.g., mammals, women, Olympic sports)")
     st.session_state.target_count = st.number_input("How many do you want to name?", min_value=1, max_value=100, step=1)
-    
+
     if st.button("Start Game") and st.session_state.category:
         st.session_state.cat_qid = get_category_qid(st.session_state.category)
         if not st.session_state.cat_qid:
