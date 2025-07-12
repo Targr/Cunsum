@@ -170,7 +170,13 @@ if not st.session_state.started:
             subcategories = fetch_subcategories(current_category)
             if not subcategories:
                 break
-            next_category = st.selectbox(f"Subcategories of '{current_category}':", ["(Use this category)"] + subcategories, key=f"sub_{current_category}")
+            import hashlib
+            key_hash = hashlib.md5(current_category.encode()).hexdigest()
+            next_category = st.selectbox(
+                f"Subcategories of '{current_category}':",
+                ["(Use this category)"] + subcategories,
+                key=f"sub_{key_hash}"
+            )
             if next_category == "(Use this category)":
                 break
             current_category = next_category
