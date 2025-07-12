@@ -55,7 +55,9 @@ def get_category_qid(category):
             return None
         data = response.json()
         if data.get('search'):
-            return data['search'][0]['id']
+            for entry in data['search']:
+                if entry.get('id') and 'disambiguation' not in entry.get('description', '').lower():
+                    return entry['id']
     except Exception as e:
         st.error(f"Category lookup failed: {e}")
     return None
@@ -76,7 +78,6 @@ def check_subclass_or_equal(child_id, parent_id):
             return False
         return response.json().get("boolean", False)
     except Exception as e:
-        st.error(f"Subclass check failed: {e}")
         return False
 
 @st.cache_data(show_spinner=False)
@@ -95,7 +96,6 @@ def validate_name_against_category(name, category, cat_qid):
             return False
         results = response.json().get("search", [])
     except Exception as e:
-        st.error(f"Search failed: {e}")
         return False
 
     for result in results:
@@ -111,10 +111,10 @@ def validate_name_against_category(name, category, cat_qid):
                 continue
             try:
                 entity_data = entity_resp.json()
-            except Exception as e:
+            except Exception:
                 continue
             claims = entity_data['entities'][qid].get('claims', {})
-        except Exception as e:
+        except Exception:
             continue
 
         if 'P31' in claims:
@@ -133,10 +133,12 @@ def validate_name_against_category(name, category, cat_qid):
         else:
             if 'P31' in claims:
                 for inst in claims['P31']:
-                    if inst['mainsnak'].get('datavalue'):
-                        inst_id = inst['mainsnak']['datavalue']['value']['id']
-                        if check_subclass_or_equal(inst_id, cat_qid):
+                    try:
+                        inst_id = inst['mainsnak'].get('datavalue', {}).get('value', {}).get('id')
+                        if inst_id and check_subclass_or_equal(inst_id, cat_qid):
                             return True
+                    except:
+                        continue
     return False
 
 # --- Leaderboard Functions --- #
