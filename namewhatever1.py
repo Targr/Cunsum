@@ -101,9 +101,13 @@ if not st.session_state.started:
     if suggestions:
         selected = st.selectbox("Matching categories:", suggestions)
         if selected:
+        valid_members = fetch_valid_category_members(selected)
+        if valid_members:
             st.session_state.category = selected
-            st.session_state.valid_members = fetch_valid_category_members(selected)
+            st.session_state.valid_members = valid_members
             st.success(f"Selected category: {selected}")
+        else:
+            st.warning("This category has no valid names. Please choose another.")
 
     st.session_state.target_count = st.number_input("How many names?", min_value=1, max_value=500, value=100, step=1)
 
@@ -115,6 +119,18 @@ if not st.session_state.started:
 
 # --- UI: Game Logic ---
 else:
+    if st.button("Back to Start"):
+        st.session_state.started = False
+        st.session_state.names = []
+        st.session_state.current_index = 0
+        st.session_state.start_time = 0.0
+        st.session_state.end_time = 0.0
+        st.session_state.times_up = False
+        st.session_state.entered_names = set()
+        st.session_state.category = ""
+        st.session_state.valid_members = []
+        st.rerun()
+
     st.title(f"Name {st.session_state.target_count} from '{st.session_state.category}'")
     col1, col2 = st.columns([3, 1])
 
@@ -149,11 +165,6 @@ else:
                 st.warning("Name not found in selected category on Wikipedia. Try again.")
 
     if st.session_state.current_index >= st.session_state.target_count and not st.session_state.times_up:
-        st.session_state.end_time = time.perf_counter()
-        st.session_state.times_up = True
-        st.balloons()
-
-    if st.session_state.times_up:
         final_time = st.session_state.end_time - st.session_state.start_time
         st.success(f"You did it in {final_time:.3f} seconds!")
 
