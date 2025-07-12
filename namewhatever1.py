@@ -101,7 +101,7 @@ if not st.session_state.started:
     if suggestions:
         selected = st.selectbox("Matching categories:", suggestions)
         if selected:
-        valid_members = fetch_valid_category_members(selected)
+                    valid_members = fetch_valid_category_members(selected)
         if valid_members:
             st.session_state.category = selected
             st.session_state.valid_members = valid_members
