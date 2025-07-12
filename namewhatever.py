@@ -1,4 +1,4 @@
-# Improved Streamlit Naming Challenge Game with Error Handling
+# Improved Streamlit Naming Challenge Game with Robust Error Handling
 import streamlit as st
 import time
 import requests
@@ -34,11 +34,15 @@ def is_valid_email(email):
 @st.cache_data(show_spinner=False)
 def get_category_qid(category):
     try:
-        search = requests.get(
+        response = requests.get(
             f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category}&language=en&format=json&type=item"
-        ).json()
-        if search['search']:
-            return search['search'][0]['id']
+        )
+        systime.sleep(0.2)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if data.get('search'):
+            return data['search'][0]['id']
     except Exception as e:
         st.error(f"Category lookup failed: {e}")
     return None
@@ -54,6 +58,9 @@ def check_subclass_or_equal(child_id, parent_id):
         endpoint = "https://query.wikidata.org/sparql"
         headers = {"Accept": "application/sparql-results+json"}
         response = requests.get(endpoint, params={"query": sparql}, headers=headers)
+        systime.sleep(0.2)
+        if response.status_code != 200:
+            return False
         return response.json().get("boolean", False)
     except Exception as e:
         st.error(f"Subclass check failed: {e}")
@@ -89,7 +96,11 @@ def validate_name_against_category(name, category, cat_qid):
             systime.sleep(0.2)
             if entity_resp.status_code != 200:
                 continue
-            entity_data = entity_resp.json()
+            try:
+                entity_data = entity_resp.json()
+            except Exception as e:
+                st.error(f"JSON decode failed for entity {qid}: {e}")
+                continue
             claims = entity_data['entities'][qid].get('claims', {})
         except Exception as e:
             st.error(f"Entity data fetch failed for {name}: {e}")
