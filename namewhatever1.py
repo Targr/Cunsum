@@ -11,6 +11,19 @@ def fetch_category_suggestions(prefix):
         return []
     url = "https://en.wikipedia.org/w/api.php"
     params = {
+        "action": "query",
+        "list": "allcategories",
+        "acprefix": prefix,
+        "aclimit": 10,
+        "format": "json"
+    }
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        return [c['*'] for c in data.get('query', {}).get('allcategories', [])]
+    return []
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {
         "action": "opensearch",
         "namespace": 14,
         "search": prefix,
