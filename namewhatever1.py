@@ -22,6 +22,45 @@ def fetch_category_suggestions(prefix):
         data = response.json()
         return [c['*'] for c in data.get('query', {}).get('allcategories', [])]
     return []
+
+@st.cache_data(show_spinner=False)
+def fetch_subcategories(parent_category):
+    url = "https://en.wikipedia.org/w/api.php"
+    subcats = []
+    cmcontinue = None
+    while True:
+        params = {
+            "action": "query",
+            "list": "categorymembers",
+            "cmtitle": f"Category:{parent_category}",
+            "cmtype": "subcat",
+            "cmlimit": 500,
+            "format": "json"
+        }
+        if cmcontinue:
+            params["cmcontinue"] = cmcontinue
+        r = requests.get(url, params=params)
+        if r.status_code != 200:
+            break
+        data = r.json()
+        subcats += [m["title"].replace("Category:", "") for m in data["query"]["categorymembers"]]
+        cmcontinue = data.get("continue", {}).get("cmcontinue")
+        if not cmcontinue:
+            break
+    return subcats
+    url = "https://en.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "list": "allcategories",
+        "acprefix": prefix,
+        "aclimit": 10,
+        "format": "json"
+    }
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        return [c['*'] for c in data.get('query', {}).get('allcategories', [])]
+    return []
     url = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "opensearch",
@@ -110,6 +149,29 @@ if not st.session_state.started:
     st.title("Can you name people from a Wikipedia category?")
 
     category_input = st.text_input("Search for a Wikipedia category:")
+    suggestions = fetch_category_suggestions(category_input)
+    selected = None
+    if suggestions:
+        selected = st.selectbox("Matching categories:", suggestions)
+
+    if selected:
+        current_category = selected
+        while True:
+            subcategories = fetch_subcategories(current_category)
+            if not subcategories:
+                break
+            next_category = st.selectbox(f"Subcategories of '{current_category}':", ["(Use this category)"] + subcategories, key=f"sub_{current_category}")
+            if next_category == "(Use this category)":
+                break
+            current_category = next_category
+
+        valid_members = fetch_valid_category_members(current_category)
+        if valid_members:
+            st.session_state.category = current_category
+            st.session_state.valid_members = valid_members
+            st.success(f"Selected category: {current_category}")
+        else:
+            st.warning("This category has no valid names. Please choose another.")
     suggestions = fetch_category_suggestions(category_input)
     if suggestions:
         selected = st.selectbox("Matching categories:", suggestions)
