@@ -38,7 +38,7 @@ def get_category_suggestions(partial):
             f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={partial}&language=en&format=json&type=item"
         )
         systime.sleep(0.2)
-        if response.status_code != 200:
+        if response.status_code != 200 or not response.text.strip():
             return []
         return [item['label'] for item in response.json().get('search', []) if 'label' in item]
     except:
@@ -51,15 +51,15 @@ def get_category_qid(category):
             f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={category}&language=en&format=json&type=item"
         )
         systime.sleep(0.2)
-        if response.status_code != 200:
+        if response.status_code != 200 or not response.text.strip():
             return None
         data = response.json()
         if data.get('search'):
             for entry in data['search']:
                 if entry.get('id') and 'disambiguation' not in entry.get('description', '').lower():
                     return entry['id']
-    except Exception as e:
-        st.error(f"Category lookup failed: {e}")
+    except Exception:
+        pass
     return None
 
 @st.cache_data(show_spinner=False)
@@ -74,10 +74,10 @@ def check_subclass_or_equal(child_id, parent_id):
         headers = {"Accept": "application/sparql-results+json"}
         response = requests.get(endpoint, params={"query": sparql}, headers=headers)
         systime.sleep(0.2)
-        if response.status_code != 200:
+        if response.status_code != 200 or not response.text.strip():
             return False
         return response.json().get("boolean", False)
-    except Exception as e:
+    except:
         return False
 
 @st.cache_data(show_spinner=False)
@@ -92,10 +92,10 @@ def validate_name_against_category(name, category, cat_qid):
         search_url = f"https://www.wikidata.org/w/api.php?action=wbsearchentities&search={name}&language=en&format=json"
         response = requests.get(search_url)
         systime.sleep(0.2)
-        if response.status_code != 200:
+        if response.status_code != 200 or not response.text.strip():
             return False
         results = response.json().get("search", [])
-    except Exception as e:
+    except:
         return False
 
     for result in results:
@@ -107,14 +107,11 @@ def validate_name_against_category(name, category, cat_qid):
             entity_url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
             entity_resp = requests.get(entity_url)
             systime.sleep(0.2)
-            if entity_resp.status_code != 200:
+            if entity_resp.status_code != 200 or not entity_resp.text.strip():
                 continue
-            try:
-                entity_data = entity_resp.json()
-            except Exception:
-                continue
+            entity_data = entity_resp.json()
             claims = entity_data['entities'][qid].get('claims', {})
-        except Exception:
+        except:
             continue
 
         if 'P31' in claims:
@@ -128,7 +125,7 @@ def validate_name_against_category(name, category, cat_qid):
                         gender_id = gender_claim['mainsnak']['datavalue']['value']['id']
                         if gender_id in ['Q6581072', 'Q1052281']:
                             return True
-                    except (KeyError, TypeError):
+                    except:
                         continue
         else:
             if 'P31' in claims:
