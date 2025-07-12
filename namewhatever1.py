@@ -12,7 +12,7 @@ def fetch_category_suggestions(prefix):
     url = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "opensearch",
-        "namespace": 14,  # Namespace 14 is for categories
+        "namespace": 14,
         "search": prefix,
         "limit": 10,
         "format": "json"
@@ -22,6 +22,31 @@ def fetch_category_suggestions(prefix):
         results = response.json()
         return [r.replace("Category:", "") for r in results[1]]
     return []
+
+@st.cache_data(show_spinner=False)
+def fetch_valid_category_members(category):
+    url = "https://en.wikipedia.org/w/api.php"
+    members = []
+    cmcontinue = None
+    while True:
+        params = {
+            "action": "query",
+            "list": "categorymembers",
+            "cmtitle": f"Category:{category}",
+            "cmlimit": 500,
+            "format": "json"
+        }
+        if cmcontinue:
+            params["cmcontinue"] = cmcontinue
+        r = requests.get(url, params=params)
+        if r.status_code != 200:
+            break
+        data = r.json()
+        members += [m["title"] for m in data["query"]["categorymembers"] if not m["title"].startswith("Category:")]
+        cmcontinue = data.get("continue", {}).get("cmcontinue")
+        if not cmcontinue:
+            break
+    return members
 
 @st.cache_data(show_spinner=False)
 def validate_name(name, category):
@@ -62,6 +87,7 @@ if 'started' not in st.session_state:
     st.session_state.entered_names = set()
     st.session_state.category = ""
     st.session_state.target_count = 100
+    st.session_state.valid_members = []
 
 leaderboard = load_leaderboard()
 st.set_page_config(page_title="Name by Wikipedia Category", layout="centered")
@@ -76,6 +102,7 @@ if not st.session_state.started:
         selected = st.selectbox("Matching categories:", suggestions)
         if selected:
             st.session_state.category = selected
+            st.session_state.valid_members = fetch_valid_category_members(selected)
             st.success(f"Selected category: {selected}")
 
     st.session_state.target_count = st.number_input("How many names?", min_value=1, max_value=500, value=100, step=1)
@@ -97,6 +124,9 @@ else:
 
     with st.expander("Names you've already entered"):
         st.write(list(st.session_state.entered_names))
+
+    with st.expander("See all possible valid names"):
+        st.write(st.session_state.valid_members[:100])  # only show first 100 for performance
 
     name_key = f"name_{st.session_state.current_index}"
     if f"_focus_{name_key}" not in st.session_state:
