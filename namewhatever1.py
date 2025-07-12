@@ -172,11 +172,14 @@ if not st.session_state.started:
                 break
             import hashlib
             key_hash = hashlib.md5(current_category.encode()).hexdigest()
-            next_category = st.selectbox(
-                f"Subcategories of '{current_category}':",
-                ["(Use this category)"] + subcategories,
-                key=f"sub_{key_hash}"
-            )
+            try:
+                next_category = st.selectbox(
+                    f"Subcategories of '{current_category}':",
+                    ["(Use this category)"] + subcategories,
+                    key=f"sub_{key_hash}"
+                )
+            except st.errors.StreamlitAPIException:
+                break
             if next_category == "(Use this category)":
                 break
             current_category = next_category
@@ -188,17 +191,7 @@ if not st.session_state.started:
             st.success(f"Selected category: {current_category}")
         else:
             st.warning("This category has no valid names. Please choose another.")
-    suggestions = fetch_category_suggestions(category_input)
-    if suggestions:
-        selected = st.selectbox("Matching categories:", suggestions)
-        if selected:
-                    valid_members = fetch_valid_category_members(selected)
-        if valid_members:
-            st.session_state.category = selected
-            st.session_state.valid_members = valid_members
-            st.success(f"Selected category: {selected}")
-        else:
-            st.warning("This category has no valid names. Please choose another.")
+    
 
     st.session_state.target_count = st.number_input("How many names?", min_value=1, max_value=500, value=100, step=1)
 
