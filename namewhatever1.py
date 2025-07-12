@@ -239,7 +239,7 @@ else:
         if name_input in st.session_state.entered_names:
             st.warning("You've already entered that name. Try a new one.")
         elif st.session_state.names[st.session_state.current_index] != name_input:
-            if validate_name(name_input, st.session_state.category):
+            if name_input in st.session_state.valid_members:
                 st.session_state.names[st.session_state.current_index] = name_input
                 st.session_state.entered_names.add(name_input)
                 st.session_state.current_index += 1
