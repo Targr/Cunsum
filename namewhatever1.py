@@ -156,7 +156,7 @@ st.set_page_config(page_title="Name by Wikipedia Category", layout="centered")
 
 # --- UI: Initial Setup ---
 if not st.session_state.started:
-    st.title("Can you name people from a Wikipedia category?")
+    st.title("Name A Certain Number of Whatever You Want")
 
     category_input = st.text_input("Search for a Wikipedia category:")
     suggestions = fetch_category_suggestions(category_input)
