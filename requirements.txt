@@ -3,3 +3,4 @@ requests
 wordfreq
 pandas
 inflect
+plotly
