@@ -124,39 +124,31 @@ for a, b in connections:
     ))
 
 # Car mesh (semi-transparent)
-if model != "Cybertruck":
-    meshX = [-0.8, 0.8, 0.8, -0.8, -0.8, 0.8, 0.8, -0.8, 0, 0]
-    meshY = [-1.5, -1.5, 1.5, 1.5, -1.5, -1.5, 1.5, 1.5, 0, 0]
-    meshZ = [0.1]*4 + [0.8]*4 + [1.2,1.2]
+import numpy as np
 
-    i=[0,0,0,4,4,1,2,3,0,4,5,6,7,1,2,3]
-    j=[1,2,3,5,6,5,6,7,8,8,9,9,4,5,6,7]
-    k=[2,3,0,6,7,6,7,4,9,9,8,8,6,7,4,5]
+# Compute bounding box for component coordinates
+all_coords = np.array(list(coords.values()))
+min_x, min_y, min_z = all_coords.min(axis=0) - 0.3
+max_x, max_y, max_z = all_coords.max(axis=0) + 0.3
 
-    traces.append(go.Mesh3d(
-        x=meshX, y=meshY, z=meshZ,
-        i=i, j=j, k=k,
-        color='lightgrey',
-        opacity=0.25,
-        flatshading=True,
-        name="Car Body"
-    ))
-else:
-    meshX = [-1.0,1.0,1.0,-1.0,-1.0,1.0,1.0,-1.0]
-    meshY = [-2.0,-2.0,2.0,2.0,-2.0,-2.0,2.0,2.0]
-    meshZ = [0,0,0,0,1.0,1.0,1.0,1.0]
-    i=[0,0,0,4,4,1,2,3,5,6,1,2]
-    j=[1,2,3,5,6,5,6,7,6,7,2,3]
-    k=[2,3,0,6,7,6,7,4,7,4,3,0]
+# Build simple rectangular mesh around features
+meshX = [min_x, max_x, max_x, min_x, min_x, max_x, max_x, min_x]
+meshY = [min_y, min_y, max_y, max_y, min_y, min_y, max_y, max_y]
+meshZ = [min_z, min_z, min_z, min_z, max_z, max_z, max_z, max_z]
 
-    traces.append(go.Mesh3d(
-        x=meshX, y=meshY, z=meshZ,
-        i=i, j=j, k=k,
-        color='grey',
-        opacity=0.2,
-        flatshading=True,
-        name="Car Body"
-    ))
+# Triangles for the cube
+i = [0,0,0,4,4,1,2,3,5,6,1,2]
+j = [1,2,3,5,6,5,6,7,6,7,2,3]
+k = [2,3,0,6,7,6,7,4,7,4,3,0]
+
+traces.append(go.Mesh3d(
+    x=meshX, y=meshY, z=meshZ,
+    i=i, j=j, k=k,
+    color='lightgrey',
+    opacity=0.15,
+    flatshading=True,
+    name="Car Body"
+))
 
 # ----------------------------
 # Layout
