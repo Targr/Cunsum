@@ -23,7 +23,7 @@ tesla_data = {
             ["Left B-Pillar Camera", "FSD ECU"], ["Right B-Pillar Camera", "FSD ECU"], ["Rear Camera", "FSD ECU"]
         ]
     },
-    "Model 3": {
+    "Model 3 (smaller, squatter sedan; simple front bumper “smile”))": {
         "coords": {
             "BCM": [0, 0.45, 0.2], "FSD ECU": [0.5, 0.45, 0.2],
             "Security Horn": [-0.75, 1.15, 0.35], "Hazard Lights Front": [0, 1.45, 0.7],
@@ -39,7 +39,7 @@ tesla_data = {
             ["Radar Sensor", "FSD ECU"], ["Charge Port ECU", "BCM"]
         ]
     },
-    "Model S": {
+    "Model S (Low, long sedan with a smooth, curved roof and slim headlights)": {
         "coords": {
             "BCM": [0, 0.5, 0.25], "FSD ECU": [0.55, 0.5, 0.25],
             "Security Horn": [-0.8, 1.2, 0.35], "Hazard Lights Front": [0, 1.55, 0.75],
@@ -55,7 +55,7 @@ tesla_data = {
             ["Radar Sensor", "FSD ECU"], ["Charge Port ECU", "BCM"]
         ]
     },
-    "Model X": {
+    "Model X (big SUV; tall body; doors that lift up like wings in the back.)": {
         "coords": {
             "BCM": [0, 0.55, 0.25], "FSD ECU": [0.6, 0.55, 0.25],
             "Security Horn": [-0.85, 1.25, 0.35], "Hazard Lights Front": [0, 1.6, 0.8],
@@ -71,7 +71,7 @@ tesla_data = {
             ["Radar Sensor", "FSD ECU"], ["Charge Port ECU", "BCM"]
         ]
     },
-    "Model Y 1": {
+    "Model Y (medium height. hatchback rear. roof has a slight slope. regular car doors)": {
         "coords": {
             "BCM": [0, 0.45, 0.25], "FSD ECU": [0.5, 0.45, 0.25],
             "Security Horn": [-0.75, 1.15, 0.35], "Hazard Lights Front": [0, 1.5, 0.75],
