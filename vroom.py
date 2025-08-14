@@ -2,7 +2,7 @@ import streamlit as st
 import plotly.graph_objects as go
 
 st.set_page_config(layout="wide")
-st.title("Tesla 3D Component Viewer")
+st.title("AB Testing Consumer Tesla Models")
 
 # ----------------------------
 # Tesla component data
@@ -71,7 +71,7 @@ tesla_data = {
             ["Radar Sensor", "FSD ECU"], ["Charge Port ECU", "BCM"]
         ]
     },
-    "Model Y": {
+    "Model Y 1": {
         "coords": {
             "BCM": [0, 0.45, 0.25], "FSD ECU": [0.5, 0.45, 0.25],
             "Security Horn": [-0.75, 1.15, 0.35], "Hazard Lights Front": [0, 1.5, 0.75],
