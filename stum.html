@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Debuggable Guitar String</title>
+<title>Guitar String Debug</title>
 <style>
   body { margin:0; overflow:hidden; background:black; }
   #hud { position:absolute; top:10px; left:10px; color:white;
@@ -13,11 +13,18 @@
 </head>
 <body>
 <div id="hud">
-  <b>Hold S to drag string 🎸</b>
-  <label>Stiffness: <span id="stiffVal">0.05</span><input type="range" id="stiff" min="0.01" max="0.2" step="0.01" value="0.05"></label>
-  <label>Damping: <span id="dampVal">0.92</span><input type="range" id="damp" min="0.8" max="0.99" step="0.01" value="0.92"></label>
-  <label>Max Pull: <span id="pullVal">2</span><input type="range" id="pull" min="0.5" max="5" step="0.1" value="2"></label>
+  <b>Hold S to strum 🎸</b>
+  <label>Stiffness: <span id="stiffVal">0.05</span>
+    <input type="range" id="stiff" min="0.01" max="0.2" step="0.01" value="0.05">
+  </label>
+  <label>Damping: <span id="dampVal">0.92</span>
+    <input type="range" id="damp" min="0.8" max="0.99" step="0.01" value="0.92">
+  </label>
+  <label>Max Pull: <span id="pullVal">2</span>
+    <input type="range" id="pull" min="0.5" max="5" step="0.1" value="2">
+  </label>
 </div>
+
 <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
 <script>
 // --- Minimal OrbitControls ---
@@ -75,11 +82,11 @@ scene.add(line);
 
 // Mouse
 let mouse=new THREE.Vector2(), strumActive=false, draggingVertex=null;
-let draggingVertexReleased=false;
+let lastMouse={x:0,y:0};
+const maxStep=0.2;
 
 // Parameters
 let stiffness=0.05, damping=0.92, maxPull=2;
-const maxStep=0.2;
 
 // HUD sliders
 document.getElementById('stiff').addEventListener('input',e=>{
@@ -97,40 +104,43 @@ document.getElementById('pull').addEventListener('input',e=>{
 
 // Events
 window.addEventListener('keydown',e=>{if(e.key.toLowerCase()==='s') strumActive=true;});
-window.addEventListener('keyup',e=>{if(e.key.toLowerCase()==='s'){draggingVertexRelease();}});
+window.addEventListener('keyup',e=>{if(e.key.toLowerCase()==='s'){draggingVertex=null;}});
 window.addEventListener('mousemove',e=>{
     mouse.x=(e.clientX/window.innerWidth)*2-1;
     mouse.y=-(e.clientY/window.innerHeight)*2+1;
 });
 
-function draggingVertexRelease(){ if(draggingVertex!==null) draggingVertexReleased=true; draggingVertex=null;}
-
-// Update physics
 function updateString(){
-    // Grab vertex
-    if(strumActive && draggingVertex===null){
-        let minDist=Infinity, closest=-1;
+    // Mouse speed
+    let dx = mouse.x - lastMouse.x;
+    let dy = mouse.y - lastMouse.y;
+    let speed = Math.sqrt(dx*dx + dy*dy) * 60; // scaled
+    lastMouse.x=mouse.x; lastMouse.y=mouse.y;
+
+    // Grab vertex only if close to mouse
+    let grabVertex = null;
+    if(strumActive){
+        let minDist = Infinity;
         for(let i=1;i<SEGMENTS;i++){
             let p=points[i].clone().project(camera);
-            let dx=p.x-mouse.x, dy=p.y-mouse.y;
-            let d=Math.sqrt(dx*dx+dy*dy);
-            if(d<minDist){ minDist=d; closest=i; }
+            let dist=Math.sqrt((p.x-mouse.x)**2+(p.y-mouse.y)**2);
+            if(dist<0.05 && dist<minDist){ minDist=dist; grabVertex=i; }
         }
-        if(closest>=0 && minDist<0.05) draggingVertex=closest;
+        draggingVertex = grabVertex;
     }
 
-    // Drag vertex
-    if(draggingVertex!==null && strumActive){
+    // Drag vertex proportional to speed
+    if(draggingVertex!==null){
         let ndc=new THREE.Vector3(mouse.x,mouse.y,0.5); ndc.unproject(camera);
         let dy=ndc.y - restPositions[draggingVertex].y;
-        if(Math.abs(dy)>maxPull) dy=Math.sign(dy)*maxPull;
-        points[draggingVertex].y = restPositions[draggingVertex].y + dy;
+        let maxDy = Math.min(maxPull, dy * speed * 0.5);
+        points[draggingVertex].y = restPositions[draggingVertex].y + maxDy;
         points[draggingVertex].x = restPositions[draggingVertex].x;
     }
 
-    // Verlet physics + wave propagation
+    // Verlet + wave propagation
     for(let i=1;i<SEGMENTS;i++){
-        if(i===draggingVertex && strumActive) continue;
+        if(i===draggingVertex) continue;
         let p=points[i], prev=prevPoints[i];
         let velocity=p.clone().sub(prev).multiplyScalar(damping);
         prevPoints[i].copy(p);
@@ -152,8 +162,6 @@ function updateString(){
     // Update buffer
     points.forEach((p,i)=>{positions[i*3]=p.x; positions[i*3+1]=p.y; positions[i*3+2]=p.z;});
     geometry.attributes.position.needsUpdate=true;
-
-    if(draggingVertexReleased) draggingVertexReleased=false;
 }
 
 // Animate
