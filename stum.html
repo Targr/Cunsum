@@ -2,16 +2,22 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Guitar String with Wave Propagation</title>
+<title>Debuggable Guitar String</title>
 <style>
   body { margin:0; overflow:hidden; background:black; }
   #hud { position:absolute; top:10px; left:10px; color:white;
-        font-family:sans-serif; background: rgba(0,0,0,0.5);
+        font-family:sans-serif; background: rgba(0,0,0,0.6);
         padding:8px 12px; border-radius:8px; }
+  #hud label { display:block; margin-top:4px; }
 </style>
 </head>
 <body>
-<div id="hud">Hold S and drag string 🎸</div>
+<div id="hud">
+  <b>Hold S to drag string 🎸</b>
+  <label>Stiffness: <span id="stiffVal">0.05</span><input type="range" id="stiff" min="0.01" max="0.2" step="0.01" value="0.05"></label>
+  <label>Damping: <span id="dampVal">0.92</span><input type="range" id="damp" min="0.8" max="0.99" step="0.01" value="0.92"></label>
+  <label>Max Pull: <span id="pullVal">2</span><input type="range" id="pull" min="0.5" max="5" step="0.1" value="2"></label>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
 <script>
 // --- Minimal OrbitControls ---
@@ -51,7 +57,7 @@ leftSphere.position.x=-3; rightSphere.position.x=3;
 scene.add(leftSphere,rightSphere);
 
 // String
-const SEGMENTS=70;  // smoother string
+const SEGMENTS=60;
 let points=[], prevPoints=[], restPositions=[];
 let positions=new Float32Array((SEGMENTS+1)*3);
 for(let i=0;i<=SEGMENTS;i++){
@@ -69,7 +75,25 @@ scene.add(line);
 
 // Mouse
 let mouse=new THREE.Vector2(), strumActive=false, draggingVertex=null;
-const MAX_PULL=2;
+let draggingVertexReleased=false;
+
+// Parameters
+let stiffness=0.05, damping=0.92, maxPull=2;
+const maxStep=0.2;
+
+// HUD sliders
+document.getElementById('stiff').addEventListener('input',e=>{
+    stiffness=parseFloat(e.target.value);
+    document.getElementById('stiffVal').innerText=stiffness.toFixed(2);
+});
+document.getElementById('damp').addEventListener('input',e=>{
+    damping=parseFloat(e.target.value);
+    document.getElementById('dampVal').innerText=damping.toFixed(2);
+});
+document.getElementById('pull').addEventListener('input',e=>{
+    maxPull=parseFloat(e.target.value);
+    document.getElementById('pullVal').innerText=maxPull.toFixed(1);
+});
 
 // Events
 window.addEventListener('keydown',e=>{if(e.key.toLowerCase()==='s') strumActive=true;});
@@ -79,34 +103,9 @@ window.addEventListener('mousemove',e=>{
     mouse.y=-(e.clientY/window.innerHeight)*2+1;
 });
 
-function draggingVertexRelease(){ if(draggingVertex!==null){ draggingVertexReleased=true; } draggingVertex=null;}
-let draggingVertexReleased=false;
+function draggingVertexRelease(){ if(draggingVertex!==null) draggingVertexReleased=true; draggingVertex=null;}
 
-// Wave propagation parameters
-const stiffness = 0.05;  // gentler spring
-const damping = 0.92;    // stronger damping
-const maxStep = 0.2;     // limit per-frame displacement
-
-for(let i=1;i<SEGMENTS;i++){
-    if(i===draggingVertex && strumActive) continue;
-    let p=points[i], prev=prevPoints[i];
-    let velocity=p.clone().sub(prev).multiplyScalar(damping);
-    prevPoints[i].copy(p);
-
-    // spring force from neighbors
-    let leftForce=new THREE.Vector3(), rightForce=new THREE.Vector3();
-    if(i>0) leftForce.subVectors(points[i-1],p);
-    if(i<SEGMENTS) rightForce.subVectors(points[i+1],p);
-    leftForce.multiplyScalar(stiffness);
-    rightForce.multiplyScalar(stiffness);
-
-    // total step and clamp
-    let step=velocity.add(leftForce).add(rightForce);
-    if(step.length()>maxStep) step.setLength(maxStep);
-    p.add(step);
-}
-
-// Animate
+// Update physics
 function updateString(){
     // Grab vertex
     if(strumActive && draggingVertex===null){
@@ -120,32 +119,33 @@ function updateString(){
         if(closest>=0 && minDist<0.05) draggingVertex=closest;
     }
 
-    // Move dragged vertex
+    // Drag vertex
     if(draggingVertex!==null && strumActive){
         let ndc=new THREE.Vector3(mouse.x,mouse.y,0.5); ndc.unproject(camera);
         let dy=ndc.y - restPositions[draggingVertex].y;
-        if(Math.abs(dy)>MAX_PULL) dy=Math.sign(dy)*MAX_PULL;
+        if(Math.abs(dy)>maxPull) dy=Math.sign(dy)*maxPull;
         points[draggingVertex].y = restPositions[draggingVertex].y + dy;
-        points[draggingVertex].z = ndc.z; // optional z displacement
-        points[draggingVertex].x = restPositions[draggingVertex].x; // keep x
+        points[draggingVertex].x = restPositions[draggingVertex].x;
     }
 
-    // Verlet-like update with horizontal wave propagation
+    // Verlet physics + wave propagation
     for(let i=1;i<SEGMENTS;i++){
-        if(i===draggingVertex && strumActive) continue; // frozen
+        if(i===draggingVertex && strumActive) continue;
         let p=points[i], prev=prevPoints[i];
         let velocity=p.clone().sub(prev).multiplyScalar(damping);
         prevPoints[i].copy(p);
-        // Apply spring force to neighbors
-        let leftForce=new THREE.Vector3();
-        let rightForce=new THREE.Vector3();
+
+        let leftForce=new THREE.Vector3(), rightForce=new THREE.Vector3();
         if(i>0) leftForce.subVectors(points[i-1],p);
         if(i<SEGMENTS) rightForce.subVectors(points[i+1],p);
         leftForce.multiplyScalar(stiffness); rightForce.multiplyScalar(stiffness);
-        p.add(velocity).add(leftForce).add(rightForce);
+
+        let step=velocity.add(leftForce).add(rightForce);
+        if(step.length()>maxStep) step.setLength(maxStep);
+        p.add(step);
     }
 
-    // Tie ends to spheres
+    // Tie ends
     points[0].copy(leftSphere.position);
     points[SEGMENTS].copy(rightSphere.position);
 
@@ -153,7 +153,6 @@ function updateString(){
     points.forEach((p,i)=>{positions[i*3]=p.x; positions[i*3+1]=p.y; positions[i*3+2]=p.z;});
     geometry.attributes.position.needsUpdate=true;
 
-    // Reset release flag after first update
     if(draggingVertexReleased) draggingVertexReleased=false;
 }
 
