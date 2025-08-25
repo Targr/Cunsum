@@ -1,0 +1,186 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Wikipedia Graph Strum</title></head>
+<body style="margin:0;overflow:hidden;">
+<div id="3d-graph" style="width:100%;height:100%;"></div>
+<div id="portal-display" style="position:absolute;top:5px;left:5px;color:white;font-family:sans-serif;font-size:14px;"></div>
+
+<script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph"></script>
+<script src="https://unpkg.com/three@0.150.1/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+const rawData = /* INSERT JSON DATA HERE */;
+
+const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
+    .graphData(rawData)
+    .nodeRelSize(4)
+    .nodeLabel(n => `<b>${n.name}</b><br>${n.summary}<br><i>${n.portals}</i>`)
+    .nodeThreeObject(node => {
+        const geo = new THREE.SphereGeometry(Math.max(0.8,(node.val||8)/8),16,16);
+        const mat = new THREE.MeshStandardMaterial({color:node.color, emissive:0x000000});
+        node.__threeObj = new THREE.Mesh(geo, mat);
+        return node.__threeObj;
+    })
+    .linkOpacity(0.3);
+
+Graph.cameraPosition({z:400});
+
+// --- Orbit Controls ---
+const controls = new THREE.OrbitControls(Graph.camera(), Graph.renderer().domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.enableZoom = true;
+controls.enablePan = true;
+
+// --- Basic Lighting ---
+const light = new THREE.DirectionalLight(0xffffff,1);
+light.position.set(0,0,500);
+Graph.scene().add(light);
+Graph.scene().add(new THREE.AmbientLight(0x404040));
+
+// --- Strum Setup ---
+const SPRING_SEGMENTS = 60;
+const TUBE_RADIUS = 0.1;
+const DAMPING = 0.98;
+const CONSTRAINT_ITER = 5;
+const TIME_STEP = 1/60;
+
+const stringGroup = new THREE.Group();
+Graph.scene().add(stringGroup);
+
+function makeStringState(src,dst){
+    const points=[], prev=[], masses=[];
+    for(let i=0;i<SPRING_SEGMENTS;i++){
+        const t=i/(SPRING_SEGMENTS-1);
+        const p=new THREE.Vector3().lerpVectors(src,dst,t);
+        points.push(p.clone());
+        prev.push(p.clone());
+        masses.push((i===0||i===SPRING_SEGMENTS-1)?0:1);
+    }
+    const restLen = src.distanceTo(dst)/(SPRING_SEGMENTS-1);
+    return {points, prev, masses, restLen, mesh:null, pinned:null};
+}
+
+function rebuildTube(state){
+    const curve=new THREE.CatmullRomCurve3(state.points);
+    const geo=new THREE.TubeGeometry(curve,SPRING_SEGMENTS*3,TUBE_RADIUS,8,false);
+    if(state.mesh){ state.mesh.geometry.dispose(); state.mesh.geometry=geo; }
+    else { state.mesh = new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:'#88aaff'})); stringGroup.add(state.mesh);}
+}
+
+function simulateString(state, src, dst){
+    state.points[0].copy(src);
+    state.points[SPRING_SEGMENTS-1].copy(dst);
+    for(let i=1;i<SPRING_SEGMENTS-1;i++){
+        if(state.pinned && state.pinned.idx===i){
+            state.points[i].copy(state.pinned.pos);
+            continue;
+        }
+        const p=state.points[i], pv=state.prev[i];
+        const vel=p.clone().sub(pv).multiplyScalar(DAMPING);
+        state.prev[i].copy(p);
+        p.add(vel);
+    }
+    for(let iter=0;iter<CONSTRAINT_ITER;iter++){
+        for(let i=0;i<SPRING_SEGMENTS-1;i++){
+            const a=state.points[i],b=state.points[i+1];
+            const diff=b.clone().sub(a);
+            const dist=Math.max(1e-6,diff.length());
+            const err=(dist-state.restLen)/dist;
+            const corr=diff.multiplyScalar(0.5*err);
+            if(state.masses[i] && !(state.pinned && state.pinned.idx===i)) a.add(corr);
+            if(state.masses[i+1] && !(state.pinned && state.pinned.idx===i+1)) b.sub(corr);
+        }
+    }
+    rebuildTube(state);
+}
+
+// --- Create Strings ---
+const linkStates=new Map();
+function getNodeObj(id){ return (typeof id==='object')?id:Graph.graphData().nodes.find(n=>n.id===id); }
+Graph.graphData().links.forEach(link=>{
+    const s=getNodeObj(link.source), t=getNodeObj(link.target);
+    const sv=new THREE.Vector3(s.x||0,s.y||0,s.z||0);
+    const tv=new THREE.Vector3(t.x||0,t.y||0,t.z||0);
+    const st=makeStringState(sv,tv);
+    rebuildTube(st);
+    linkStates.set(link,st);
+});
+
+// --- Pick and HUD ---
+const pickRadius=0.5;
+const pickMesh=new THREE.Mesh(new THREE.SphereGeometry(pickRadius,32,32),new THREE.MeshBasicMaterial({color:0x00ffcc,transparent:true,opacity:0.3}));
+Graph.scene().add(pickMesh);
+
+const hud=document.createElement('div');
+hud.style.position='absolute';
+hud.style.top='10px';
+hud.style.right='10px';
+hud.style.color='white';
+hud.style.fontFamily='monospace';
+hud.style.background='rgba(0,0,0,0.5)';
+hud.style.padding='5px';
+hud.innerHTML = `
+<b>Strum Settings</b><br/>
+Stiffness: <input type="range" id="stiffness" min="0.01" max="0.5" step="0.01" value="0.1"><br/>
+Max Pull: <input type="range" id="maxpull" min="0.05" max="1.0" step="0.01" value="0.25">
+`;
+document.body.appendChild(hud);
+
+let strumActive=false;
+let mouse=new THREE.Vector2(), lastMouse=new THREE.Vector2(), mouseVel=0;
+
+document.addEventListener('keydown',e=>{ if(e.key.toLowerCase()==='s') strumActive=true; });
+document.addEventListener('keyup',e=>{ if(e.key.toLowerCase()==='s') strumActive=false; linkStates.forEach(st=>st.pinned=null); });
+
+Graph.renderer().domElement.addEventListener('mousemove',ev=>{
+    const rect=Graph.renderer().domElement.getBoundingClientRect();
+    mouse.x=((ev.clientX-rect.left)/rect.width)*2-1;
+    mouse.y=-((ev.clientY-rect.top)/rect.height)*2+1;
+    mouseVel=Math.sqrt((mouse.x-lastMouse.x)**2+(mouse.y-lastMouse.y)**2)*60;
+    lastMouse.copy(mouse);
+
+    // Project pick to scene plane at z=0
+    const vec=new THREE.Vector3(mouse.x,mouse.y,0.5).unproject(Graph.camera());
+    pickMesh.position.copy(vec);
+
+    if(strumActive){
+        const stiffness=parseFloat(document.getElementById('stiffness').value);
+        const maxPull=parseFloat(document.getElementById('maxpull').value);
+
+        linkStates.forEach(st=>{
+            if(st.pinned) return; // already pinned
+            let closestIdx=-1, closestDist=Infinity;
+            for(let i=1;i<st.points.length-1;i++){
+                const d=st.points[i].distanceTo(vec);
+                if(d<closestDist){ closestDist=d; closestIdx=i; }
+            }
+            if(closestDist<pickRadius){
+                st.pinned={idx:closestIdx,pos:st.points[closestIdx].clone()};
+            }
+        });
+    }
+});
+
+// --- Engine Tick ---
+Graph.onEngineTick(()=>{
+    linkStates.forEach((st,link)=>{
+        const s=getNodeObj(link.source), t=getNodeObj(link.target);
+        const sv=new THREE.Vector3(s.x||0,s.y||0,s.z||0);
+        const tv=new THREE.Vector3(t.x||0,t.y||0,t.z||0);
+        if(st.pinned){
+            const target=st.points[st.pinned.idx];
+            const dir=pickMesh.position.clone().sub(target);
+            const stiffness=parseFloat(document.getElementById('stiffness').value);
+            const maxPull=parseFloat(document.getElementById('maxpull').value);
+            if(dir.length()>maxPull) st.pinned=null;
+            else st.pinned.pos.add(dir.multiplyScalar(stiffness));
+        }
+        simulateString(st,sv,tv);
+    });
+    controls.update();
+});
+</script>
+</body>
+</html>
