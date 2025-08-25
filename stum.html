@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Guitar String Pull & Release</title>
+<title>Guitar String with Wave Propagation</title>
 <style>
   body { margin:0; overflow:hidden; background:black; }
   #hud { position:absolute; top:10px; left:10px; color:white;
@@ -11,7 +11,7 @@
 </style>
 </head>
 <body>
-<div id="hud">Hold S and drag vertex 🎸</div>
+<div id="hud">Hold S and drag string 🎸</div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
 <script>
 // --- Minimal OrbitControls ---
@@ -51,15 +51,15 @@ leftSphere.position.x=-3; rightSphere.position.x=3;
 scene.add(leftSphere,rightSphere);
 
 // String
-const SEGMENTS=60;
-let points=[], velocities=[], restPositions=[];
+const SEGMENTS=60;  // smoother string
+let points=[], prevPoints=[], restPositions=[];
 let positions=new Float32Array((SEGMENTS+1)*3);
 for(let i=0;i<=SEGMENTS;i++){
     let t=i/SEGMENTS;
     let p=new THREE.Vector3(-3+6*t,0,0);
     points.push(p.clone());
+    prevPoints.push(p.clone());
     restPositions.push(p.clone());
-    velocities.push(new THREE.Vector3());
     positions[i*3]=p.x; positions[i*3+1]=p.y; positions[i*3+2]=p.z;
 }
 let geometry=new THREE.BufferGeometry();
@@ -67,26 +67,27 @@ geometry.setAttribute('position',new THREE.BufferAttribute(positions,3));
 let line=new THREE.Line(geometry,new THREE.LineBasicMaterial({color:0xffffff}));
 scene.add(line);
 
-// Mouse & raycaster
-let mouse=new THREE.Vector2(), raycaster=new THREE.Raycaster();
-let strumActive=false, draggingVertex=null;
-const MAX_PULL=10; // max distance from rest position
+// Mouse
+let mouse=new THREE.Vector2(), strumActive=false, draggingVertex=null;
+const MAX_PULL=2;
 
 // Events
 window.addEventListener('keydown',e=>{if(e.key.toLowerCase()==='s') strumActive=true;});
-window.addEventListener('keyup',e=>{if(e.key.toLowerCase()==='s'){releaseVertex();}});
+window.addEventListener('keyup',e=>{if(e.key.toLowerCase()==='s'){draggingVertexRelease();}});
 window.addEventListener('mousemove',e=>{
     mouse.x=(e.clientX/window.innerWidth)*2-1;
     mouse.y=-(e.clientY/window.innerHeight)*2+1;
 });
 
-// Helpers
-function releaseVertex(){ if(draggingVertex!==null){ velocities[draggingVertex].y=0; draggingVertexRelease=true; } draggingVertex=null; draggingVertexRelease=false;}
-let draggingVertexRelease=false;
+function draggingVertexRelease(){ if(draggingVertex!==null){ draggingVertexReleased=true; } draggingVertex=null;}
+let draggingVertexReleased=false;
 
-// Update physics
+// Wave propagation parameters
+const stiffness=0.2, damping=0.96;
+
+// Animate
 function updateString(){
-    // Pick closest vertex to drag if S held
+    // Grab vertex
     if(strumActive && draggingVertex===null){
         let minDist=Infinity, closest=-1;
         for(let i=1;i<SEGMENTS;i++){
@@ -98,24 +99,29 @@ function updateString(){
         if(closest>=0 && minDist<0.05) draggingVertex=closest;
     }
 
-    // Drag vertex along mouse while S held, clamped to MAX_PULL
+    // Move dragged vertex
     if(draggingVertex!==null && strumActive){
-        let ndc=new THREE.Vector3(mouse.x,mouse.y,0.5);
-        ndc.unproject(camera);
+        let ndc=new THREE.Vector3(mouse.x,mouse.y,0.5); ndc.unproject(camera);
         let dy=ndc.y - restPositions[draggingVertex].y;
-        if(Math.abs(dy)>MAX_PULL) dy = Math.sign(dy)*MAX_PULL;
+        if(Math.abs(dy)>MAX_PULL) dy=Math.sign(dy)*MAX_PULL;
         points[draggingVertex].y = restPositions[draggingVertex].y + dy;
+        points[draggingVertex].z = ndc.z; // optional z displacement
+        points[draggingVertex].x = restPositions[draggingVertex].x; // keep x
     }
 
-    // Physics only runs if released
-    if(!strumActive || draggingVertexRelease){
-        for(let i=1;i<SEGMENTS;i++){
-            if(i===draggingVertex) continue;
-            let dy=restPositions[i].y - points[i].y;
-            velocities[i].y += dy*0.15; // spring
-            velocities[i].y *= 0.96;    // damping
-            points[i].y += velocities[i].y;
-        }
+    // Verlet-like update with horizontal wave propagation
+    for(let i=1;i<SEGMENTS;i++){
+        if(i===draggingVertex && strumActive) continue; // frozen
+        let p=points[i], prev=prevPoints[i];
+        let velocity=p.clone().sub(prev).multiplyScalar(damping);
+        prevPoints[i].copy(p);
+        // Apply spring force to neighbors
+        let leftForce=new THREE.Vector3();
+        let rightForce=new THREE.Vector3();
+        if(i>0) leftForce.subVectors(points[i-1],p);
+        if(i<SEGMENTS) rightForce.subVectors(points[i+1],p);
+        leftForce.multiplyScalar(stiffness); rightForce.multiplyScalar(stiffness);
+        p.add(velocity).add(leftForce).add(rightForce);
     }
 
     // Tie ends to spheres
@@ -126,8 +132,8 @@ function updateString(){
     points.forEach((p,i)=>{positions[i*3]=p.x; positions[i*3+1]=p.y; positions[i*3+2]=p.z;});
     geometry.attributes.position.needsUpdate=true;
 
-    // Clear release flag after first physics update
-    if(draggingVertexRelease) draggingVertexRelease=false;
+    // Reset release flag after first update
+    if(draggingVertexReleased) draggingVertexReleased=false;
 }
 
 // Animate
