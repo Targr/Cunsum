@@ -83,7 +83,28 @@ function draggingVertexRelease(){ if(draggingVertex!==null){ draggingVertexRelea
 let draggingVertexReleased=false;
 
 // Wave propagation parameters
-const stiffness=0.05, damping=0.92;
+const stiffness = 0.05;  // gentler spring
+const damping = 0.92;    // stronger damping
+const maxStep = 0.2;     // limit per-frame displacement
+
+for(let i=1;i<SEGMENTS;i++){
+    if(i===draggingVertex && strumActive) continue;
+    let p=points[i], prev=prevPoints[i];
+    let velocity=p.clone().sub(prev).multiplyScalar(damping);
+    prevPoints[i].copy(p);
+
+    // spring force from neighbors
+    let leftForce=new THREE.Vector3(), rightForce=new THREE.Vector3();
+    if(i>0) leftForce.subVectors(points[i-1],p);
+    if(i<SEGMENTS) rightForce.subVectors(points[i+1],p);
+    leftForce.multiplyScalar(stiffness);
+    rightForce.multiplyScalar(stiffness);
+
+    // total step and clamp
+    let step=velocity.add(leftForce).add(rightForce);
+    if(step.length()>maxStep) step.setLength(maxStep);
+    p.add(step);
+}
 
 // Animate
 function updateString(){
