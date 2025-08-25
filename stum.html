@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Guitar String Pull</title>
+<title>Guitar String Pull & Release</title>
 <style>
   body { margin:0; overflow:hidden; background:black; }
   #hud { position:absolute; top:10px; left:10px; color:white;
@@ -11,12 +11,12 @@
 </style>
 </head>
 <body>
-<div id="hud">Hold S and drag vertex to pull string 🎸</div>
+<div id="hud">Hold S and drag vertex 🎸</div>
 <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
 <script>
 // --- Minimal OrbitControls ---
-THREE.OrbitControls = function (object, domElement) {
-    this.object = object; this.domElement = domElement;
+THREE.OrbitControls=function(object,domElement){
+    this.object=object; this.domElement=domElement;
     let isDown=false, startX=0,startY=0,rotX=0,rotY=0;
     domElement.addEventListener('mousedown',e=>{if(e.button===0){isDown=true;startX=e.clientX;startY=e.clientY;}});
     domElement.addEventListener('mouseup',e=>{isDown=false;});
@@ -70,16 +70,24 @@ scene.add(line);
 // Mouse & raycaster
 let mouse=new THREE.Vector2(), raycaster=new THREE.Raycaster();
 let strumActive=false, draggingVertex=null;
+const MAX_PULL=2; // max distance from rest position
 
 // Events
 window.addEventListener('keydown',e=>{if(e.key.toLowerCase()==='s') strumActive=true;});
-window.addEventListener('keyup',e=>{if(e.key.toLowerCase()==='s'){strumActive=false; draggingVertex=null;}});
+window.addEventListener('keyup',e=>{if(e.key.toLowerCase()==='s'){releaseVertex();}});
 window.addEventListener('mousemove',e=>{
     mouse.x=(e.clientX/window.innerWidth)*2-1;
     mouse.y=-(e.clientY/window.innerHeight)*2+1;
+});
 
+// Helpers
+function releaseVertex(){ if(draggingVertex!==null){ velocities[draggingVertex].y=0; draggingVertexRelease=true; } draggingVertex=null; draggingVertexRelease=false;}
+let draggingVertexRelease=false;
+
+// Update physics
+function updateString(){
+    // Pick closest vertex to drag if S held
     if(strumActive && draggingVertex===null){
-        // pick closest vertex to mouse
         let minDist=Infinity, closest=-1;
         for(let i=1;i<SEGMENTS;i++){
             let p=points[i].clone().project(camera);
@@ -89,36 +97,37 @@ window.addEventListener('mousemove',e=>{
         }
         if(closest>=0 && minDist<0.05) draggingVertex=closest;
     }
-});
 
-// Update physics
-function updateString(){
-    // pull the dragged vertex
-    if(draggingVertex!==null){
+    // Drag vertex along mouse while S held, clamped to MAX_PULL
+    if(draggingVertex!==null && strumActive){
         let ndc=new THREE.Vector3(mouse.x,mouse.y,0.5);
         ndc.unproject(camera);
-        points[draggingVertex].y = ndc.y;
+        let dy=ndc.y - restPositions[draggingVertex].y;
+        if(Math.abs(dy)>MAX_PULL) dy = Math.sign(dy)*MAX_PULL;
+        points[draggingVertex].y = restPositions[draggingVertex].y + dy;
     }
 
-    for(let i=1;i<SEGMENTS;i++){
-        if(i===draggingVertex) continue; // skip pulled vertex
-        let dy=restPositions[i].y - points[i].y;
-        velocities[i].y += dy*0.1; // spring force
-        velocities[i].y *= 0.95;   // damping
-        points[i].y += velocities[i].y;
+    // Physics only runs if released
+    if(!strumActive || draggingVertexRelease){
+        for(let i=1;i<SEGMENTS;i++){
+            if(i===draggingVertex) continue;
+            let dy=restPositions[i].y - points[i].y;
+            velocities[i].y += dy*0.15; // spring
+            velocities[i].y *= 0.96;    // damping
+            points[i].y += velocities[i].y;
+        }
     }
 
-    // tie ends to spheres
+    // Tie ends to spheres
     points[0].copy(leftSphere.position);
     points[SEGMENTS].copy(rightSphere.position);
 
-    // optionally snap dragged vertex back if released
-    if(!strumActive && draggingVertex!==null){
-        draggingVertex=null;
-    }
-
+    // Update buffer
     points.forEach((p,i)=>{positions[i*3]=p.x; positions[i*3+1]=p.y; positions[i*3+2]=p.z;});
     geometry.attributes.position.needsUpdate=true;
+
+    // Clear release flag after first physics update
+    if(draggingVertexRelease) draggingVertexRelease=false;
 }
 
 // Animate
@@ -130,7 +139,7 @@ function animate(){
 }
 animate();
 
-window.addEventListener('resize', ()=>{
+window.addEventListener('resize',()=>{
     camera.aspect=window.innerWidth/window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth,window.innerHeight);
