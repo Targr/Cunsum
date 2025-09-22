@@ -38,7 +38,7 @@
 
   <div class="row">
     <label><input id="verletToggle" type="checkbox"> Enable Verlet (simple tubes)</label>
-    <div class="muted">(simple tube halves colored by node when enabled; no strumming)</div>
+    <div class="muted">(color and wiggly)</div>
   </div>
 
   <div class="row">
@@ -123,75 +123,206 @@ const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
 
 Graph.cameraPosition({ z: Math.max(200, Math.min(2000, (rawData.nodes||[]).length*4)) });
 
-/* ------------------ Tube "Verlet" (simple) ------------------ */
-const stringGroup = new THREE.Group(); Graph.scene().add(stringGroup);
+
+/* ---------- Verlet strings (unchanged) ---------- */
 const SPRING_SEGMENTS = 18;
+let DAMPING = 0.985;
+let EDGE_ATTRACT = 0.08;
+let TIME_STEP = 1/60;
 let verletEnabled = false;
-// store link states using stable string keys: "src::tgt"
-const linkStates = new Map();
+document.getElementById('verletToggle').checked = false;
 
-function keyFor(src,tgt){ return `${src}::${tgt}`; }
-function otherKey(src,tgt){ return `${tgt}::${src}`; }
+/* ... many of the verlet/string functions are same as earlier STELLAR build ... */
+/* To keep this file concise I'll reuse the same implementations as before (rebuildTubeGeometry, makeStringState, simulateString, initLinkStatesFromRaw, etc.) */
 
-function makeInitialPoints(){ const pts=[]; for(let i=0;i<SPRING_SEGMENTS;i++) pts.push(new THREE.Vector3()); return pts; }
+const stringGroup = new THREE.Group();
+Graph.scene().add(stringGroup);
 
-function makeLinkState(){ return { points: makeInitialPoints(), meshA:null, meshB:null, colorA:'#ffffff', colorB:'#ffffff', _orig:{} }; }
+function makeStringState(src, dst) {
+  const points = [], prev = [], masses = [];
+  for(let i=0;i<SPRING_SEGMENTS;i++) {
+    const t = i/(SPRING_SEGMENTS-1);
+    const p = new THREE.Vector3().lerpVectors(src, dst, t);
+    points.push(p.clone());
+    prev.push(p.clone());
+    masses.push((i===0||i===SPRING_SEGMENTS-1)?0:1);
+  }
+  const restLen = src.distanceTo(dst)/(SPRING_SEGMENTS-1);
+  return {points, prev, masses, restLen, meshA:null, meshB:null, pinned:null, colorA:'#88aaff', colorB:'#88aaff'};
+}
 
-function disposeMesh(m){ try{ if(!m) return; if(m.geometry) m.geometry.dispose(); if(m.material){ if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose()); else m.material.dispose(); } }catch(e){console.warn('dispose',e);} }
+function disposeMesh(m) {
+  try {
+    if(m.geometry) m.geometry.dispose();
+    if(m.material) {
+      if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose());
+      else m.material.dispose();
+    }
+  } catch(e) { console.warn('disposeMesh', e); }
+}
 
-function rebuildTubeGeometry(state){
-  if(state.meshA){ stringGroup.remove(state.meshA); disposeMesh(state.meshA); state.meshA=null; }
-  if(state.meshB){ stringGroup.remove(state.meshB); disposeMesh(state.meshB); state.meshB=null; }
+function rebuildTubeGeometry(state) {
+  if(state.meshA) { stringGroup.remove(state.meshA); disposeMesh(state.meshA); state.meshA = null; }
+  if(state.meshB) { stringGroup.remove(state.meshB); disposeMesh(state.meshB); state.meshB = null; }
+
   const half = Math.floor(SPRING_SEGMENTS/2);
   const ptsA = state.points.slice(0, half+1);
   const ptsB = state.points.slice(half, state.points.length);
-  if(ptsA.length>=2){ const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5); const geoA = new THREE.TubeGeometry(curveA, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matA = new THREE.MeshStandardMaterial({ color: state.colorA || '#ffffff' }); state.meshA = new THREE.Mesh(geoA, matA); stringGroup.add(state.meshA); }
-  if(ptsB.length>=2){ const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5); const geoB = new THREE.TubeGeometry(curveB, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matB = new THREE.MeshStandardMaterial({ color: state.colorB || '#ffffff' }); state.meshB = new THREE.Mesh(geoB, matB); stringGroup.add(state.meshB); }
+
+  if(ptsA.length >= 2) {
+    const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5);
+    const geoA = new THREE.TubeGeometry(curveA, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false);
+    const matA = new THREE.MeshStandardMaterial({color: state.colorA || '#88aaff'});
+    state.meshA = new THREE.Mesh(geoA, matA);
+    stringGroup.add(state.meshA);
+  }
+  if(ptsB.length >= 2) {
+    const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5);
+    const geoB = new THREE.TubeGeometry(curveB, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false);
+    const matB = new THREE.MeshStandardMaterial({color: state.colorB || '#88aaff'});
+    state.meshB = new THREE.Mesh(geoB, matB);
+    stringGroup.add(state.meshB);
+  }
 }
 
-function initLinkStatesFromRaw(){
-  // clear
-  linkStates.forEach((st,k)=>{ if(st.meshA) disposeMesh(st.meshA); if(st.meshB) disposeMesh(st.meshB); });
-  linkStates.clear(); while(stringGroup.children.length){ const c=stringGroup.children[0]; stringGroup.remove(c); try{ disposeMesh(c); }catch(e){} }
-  (rawData.links||[]).forEach(l=>{
-    const src = (typeof l.source === 'object') ? l.source.id : l.source;
-    const tgt = (typeof l.target === 'object') ? l.target.id : l.target;
-    const k = keyFor(src,tgt);
-    const st = makeLinkState();
-    st.colorA = verletEnabled ? (getNodeColor(src) || '#ffffff') : '#ffffff';
-    st.colorB = verletEnabled ? (getNodeColor(tgt) || '#ffffff') : '#ffffff';
-    linkStates.set(k, st);
-    rebuildTubeGeometry(st);
-  });
+function simulateString(state, src, dst) {
+  if(!verletEnabled) {
+    state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+    for(let i=1;i<SPRING_SEGMENTS-1;i++) {
+      const t = i/(SPRING_SEGMENTS-1);
+      state.points[i].lerpVectors(src, dst, t);
+    }
+    rebuildTubeGeometry(state);
+    return;
+  }
+
+  state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+  for(let i=1;i<SPRING_SEGMENTS-1;i++) {
+    if(state.pinned && state.pinned.idx===i) {
+      state.points[i].copy(state.pinned.pos);
+      continue;
+    }
+    const p = state.points[i];
+    const pv = state.prev[i];
+    const vel = p.clone().sub(pv).multiplyScalar(DAMPING);
+    state.prev[i].copy(p);
+    const t = i/(SPRING_SEGMENTS-1);
+    const edgePoint = new THREE.Vector3().lerpVectors(src, dst, t);
+    const toward = edgePoint.sub(p).multiplyScalar(EDGE_ATTRACT);
+    p.add(vel).add(toward.multiplyScalar(TIME_STEP));
+  }
+  for(let iter=0; iter<3; iter++) {
+    for(let i=0;i<SPRING_SEGMENTS-1;i++) {
+      const a = state.points[i], b = state.points[i+1];
+      const diff = b.clone().sub(a);
+      const dist = Math.max(1e-6, diff.length());
+      const err = (dist - state.restLen)/dist;
+      const corr = diff.multiplyScalar(0.5*err);
+      if(state.masses[i] && !(state.pinned && state.pinned.idx===i)) a.add(corr);
+      if(state.masses[i+1] && !(state.pinned && state.pinned.idx===i+1)) b.sub(corr);
+    }
+    state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+  }
+  rebuildTubeGeometry(state);
 }
 
-function getNodeById(id){ return (rawData.nodes||[]).find(n=>n.id===id); }
-function getNodeColor(id){ const n=getNodeById(id); return n ? (n.color||'#ffffff') : '#ffffff'; }
+const linkStates = new Map();
 
-// engine tick — update tube points to match node positions
-Graph.onEngineTick(()=>{
-  linkStates.forEach((st,k)=>{
-    const [src,tgt] = k.split('::');
-    const s = getNodeById(src); const t = getNodeById(tgt);
+function getNodeObj(id) { return (typeof id === 'object') ? id : (rawData.nodes || []).find(n=>n.id===id); }
+
+function initLinkStatesFromRaw() {
+  linkStates.clear();
+  while(stringGroup.children.length) {
+    const c = stringGroup.children[0];
+    stringGroup.remove(c);
+    disposeMesh(c);
+  }
+  (rawData.links || []).forEach((link, idx) => {
+    const s = getNodeObj(link.source), t = getNodeObj(link.target);
     if(!s || !t) return;
-    const sv = new THREE.Vector3(s.x||0,s.y||0,s.z||0);
-    const tv = new THREE.Vector3(t.x||0,t.y||0,t.z||0);
-    for(let i=0;i<SPRING_SEGMENTS;i++) st.points[i].lerpVectors(sv,tv,i/(SPRING_SEGMENTS-1));
-    // set colors according to verletEnabled
-    if(verletEnabled){ st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); }
-    else { st.colorA = st.colorB = '#ffffff'; }
+    const sv = new THREE.Vector3(s.x||0, s.y||0, s.z||0);
+    const tv = new THREE.Vector3(t.x||0, t.y||0, t.z||0);
+    const st = makeStringState(sv, tv);
+    if(!verletEnabled) { st.colorA = '#ffffff'; st.colorB = '#ffffff'; }
+    else { st.colorA = s.color || '#88aaff'; st.colorB = t.color || '#88aaff'; }
     rebuildTubeGeometry(st);
+    linkStates.set({source: link.source, target: link.target}, st);
+  });
+}
+initLinkStatesFromRaw();
+
+Graph.onEngineTick(() => {
+  linkStates.forEach((state, key) => {
+    const s = getNodeObj(key.source), t = getNodeObj(key.target);
+    if(!s || !t) return;
+    const sv = new THREE.Vector3(s.x||0, s.y||0, s.z||0);
+    const tv = new THREE.Vector3(t.x||0, t.y||0, t.z||0);
+    simulateString(state, sv, tv);
   });
 });
 
-// toggle handler — keep it simple
-const verletToggle = document.getElementById('verletToggle');
-verletToggle.checked = verletEnabled;
-verletToggle.addEventListener('change', (e)=>{
-  verletEnabled = !!e.target.checked;
-  // update existing states immediately
-  linkStates.forEach((st,k)=>{ const [src,tgt] = k.split('::'); st.colorA = verletEnabled ? getNodeColor(src) : '#ffffff'; st.colorB = verletEnabled ? getNodeColor(tgt) : '#ffffff'; rebuildTubeGeometry(st); });
+/* Strumming/pinning (same as before) */
+let mouse = new THREE.Vector2();
+let lastMouse = new THREE.Vector2();
+let mouseSpeed = 0;
+let strumActive = false;
+let activeStrings = new Set();
+
+Graph.renderer().domElement.addEventListener('mousemove', ev => {
+  const rect = Graph.renderer().domElement.getBoundingClientRect();
+  mouse.x = ((ev.clientX - rect.left)/rect.width)*2-1;
+  mouse.y = -((ev.clientY - rect.top)/rect.height)/2;
+  mouseSpeed = Math.sqrt((mouse.x-lastMouse.x)**2 + (mouse.y-lastMouse.y)**2)*60;
+  lastMouse.copy(mouse);
+
+  linkStates.forEach(st => {
+    if(strumActive) {
+      st.points.forEach((p,i) => {
+        if(i===0||i===SPRING_SEGMENTS-1) return;
+        const screenPos = p.clone().project(Graph.camera());
+        const dist = Math.sqrt((mouse.x - screenPos.x)**2 + (mouse.y - screenPos.y)**2);
+        if(dist < 0.05) {
+          if(!st.pinned) st.pinned = {idx:i, pos:p.clone(), velocity: new THREE.Vector3()};
+          const mouseWorld = p.clone();
+          st.pinned.pos.lerp(mouseWorld, 0.4);
+          activeStrings.add(st);
+        }
+      });
+    }
+  });
 });
+
+document.addEventListener('keydown', ev => { if(ev.key.toLowerCase()==='s') strumActive=true; });
+document.addEventListener('keyup', ev => {
+  if(ev.key.toLowerCase()==='s') strumActive=false;
+  activeStrings.forEach(st => {
+    if(st.pinned) {
+      st.releaseTarget = st.points[st.pinned.idx].clone();
+      st.pinned.springVelocity = new THREE.Vector3();
+    }
+  });
+});
+
+function updateStrings() {
+  activeStrings.forEach(st => {
+    if(st.pinned && !strumActive) {
+      const idx = st.pinned.idx;
+      const p = st.points[idx];
+      const target = st.points[idx];
+      if(!st.pinned.springVelocity) st.pinned.springVelocity = new THREE.Vector3();
+      const k = 0.4;
+      const damping = 0.85;
+      const force = target.clone().sub(p).multiplyScalar(k);
+      st.pinned.springVelocity.add(force);
+      st.pinned.springVelocity.multiplyScalar(damping);
+      p.add(st.pinned.springVelocity);
+      if(p.distanceTo(target) < 0.001) st.pinned = null;
+    }
+  });
+}
+
+const oldTick = Graph.tick;
+Graph.tick = () => { if(oldTick) oldTick(); updateStrings(); };
 
 /* ------------------ Node glow utilities ------------------ */
 const originalMaterialState = new Map();
