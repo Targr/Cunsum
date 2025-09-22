@@ -1,0 +1,467 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>template_fixed3 — patched (Verlet, Regen, Adjacent TTS)</title>
+<style>
+  body { margin:0; overflow:hidden; background:#000; }
+  #hud { position:absolute; top:8px; right:8px; color:white; font-family:sans-serif; font-size:13px;
+          background:rgba(0,0,0,0.8); padding:12px; border-radius:10px; z-index:30; width:420px; }
+  #portal-display { position:absolute; top:8px; left:8px; color:white; font-family:sans-serif; font-size:14px; z-index:30; max-width:600px; white-space:pre-wrap; }
+  .btn { padding:6px 8px; margin-right:6px; }
+  .small { font-size:12px; color:#ddd; }
+  #hud .row { margin-top:8px; }
+  #hud .muted { color:#999; font-size:12px; }
+</style>
+</head>
+<body>
+<div id="3d-graph" style="width:100%;height:100%;"></div>
+<div id="portal-display"></div>
+
+<div id="hud">
+  <div><b>Wikipedia Graph (patched)</b></div>
+
+  <div class="row">
+    <label class="small">Seed articles (comma-separated):<br>
+      <input id="seedInput" type="text" style="width:380px;" placeholder="Dog,Cat">
+    </label>
+  </div>
+
+  <div class="row">
+    <label class="small">Direct-neighbor limit:<br>
+      <input id="limitInput" type="number" style="width:100px;" placeholder="20">
+    </label>
+    <label class="small" style="margin-left:10px;">Connector limit:<br>
+      <input id="connectorInput" type="number" value="20" style="width:90px;">
+    </label>
+  </div>
+
+  <div class="row">
+    <label><input id="verletToggle" type="checkbox"> Enable Verlet (simple tubes)</label>
+    <div class="muted">(simple tube halves colored by node when enabled; no strumming)</div>
+  </div>
+
+  <div class="row">
+    <button id="regenBtn" class="btn">Regenerate</button>
+    <button id="resetSelect" class="btn">Clear Selection</button>
+    <button id="hud-merge-nodes-btn" class="btn">Merge Nodes</button>
+    <button id="hud-read-summary-btn" class="btn">Read Summary (TTS)</button>
+    <label style="margin-left:8px;">
+      <input id="readAdjacent" type="checkbox"> <span class="small">Auto-read adjacent</span>
+    </label>
+  </div>
+
+  <div class="row">
+    <label class="small">Color picker for selected:</label><br>
+    <input id="colorInput" type="color" value="#ff0000" style="width:90px;">
+    <button id="applyColor" class="btn">Apply Color</button>
+  </div>
+
+  <div id="hud-status" class="row" style="margin-top:10px;color:#04B819;"></div>
+</div>
+
+<!-- libs -->
+<script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph"></script>
+<script src="https://unpkg.com/three-spritetext"></script>
+
+<script>
+// Small global error helper
+window.onerror = function(msg, src, ln, col, err){
+  console.error('GLOBAL ERROR', msg, src+':'+ln+':'+col, err);
+  const hud = document.getElementById('hud-status'); if(hud) hud.innerText = 'JS ERROR — see console';
+  return false;
+};
+</script>
+
+<!-- try accept server-injected data -->
+<script>
+try{ window.rawData = __DATA__; }catch(e){ window.rawData = { nodes: [], links: [] }; }
+let rawData = window.rawData; // mutable reference
+</script>
+
+<script>
+/* ================ Patched client code ================
+   Fixes applied in this patch:
+   1) Regen: robust dependable regeneration (avoids duplicate variable declarations,
+      updates window.rawData and Graph properly, proper UI status updates)
+   2) Verlet: checkbox now toggles a simple tube rendering mode (no strumming) and
+      rebuilds tube visuals immediately
+   3) Adjacent reading: speakNode now finds a neighbor on the same edge, speaks
+      a connection description (directionality / mutual / shared neighbors), highlights
+      the connecting tube while speaking, then recurses
+   4) Misc: use string keys for linkStates map (reliable lookups), extra error handling
+*/
+
+const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
+  .graphData(rawData)
+  .nodeRelSize(4)
+  .nodeLabel(n => {
+    if(n.mergedArticles) return `<b>${n.mergedArticles.join(' + ')}</b>\n${(n.mergedSummaries||[]).join('\n\n')}`;
+    return `<b>${n.name}</b>\n${n.summary || ''}`;
+  })
+  .nodeThreeObject(node => {
+    // nodes as spheres
+    if(node.mergedColors && Array.isArray(node.mergedColors) && node.mergedColors.length >= 2){
+      const cA = new THREE.Color(node.mergedColors[0] || '#ff0000');
+      const cB = new THREE.Color(node.mergedColors[1] || '#0000ff');
+      const geo = new THREE.SphereGeometry(Math.max(0.8, (node.val||12)/8), 24, 24);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: { colorA: { value: cA }, colorB: { value: cB } },
+        vertexShader: 'varying vec3 vPos; void main(){ vPos = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+        fragmentShader: 'uniform vec3 colorA; uniform vec3 colorB; varying vec3 vPos; void main(){ if(vPos.x < 0.0) gl_FragColor = vec4(colorA,1.0); else gl_FragColor = vec4(colorB,1.0); }'
+      });
+      const mesh = new THREE.Mesh(geo, mat); mesh.userData._nodeId = node.id; return mesh;
+    } else {
+      const geo = new THREE.SphereGeometry(Math.max(0.8, (node.val||12)/8), 16, 16);
+      const mat = new THREE.MeshStandardMaterial({ color: node.color || '#ffffff', emissive: new THREE.Color(0x000000), emissiveIntensity: 0 });
+      const mesh = new THREE.Mesh(geo, mat); mesh.userData._nodeId = node.id; return mesh;
+    }
+  })
+  .linkOpacity(0.6)
+  .backgroundColor('#000');
+
+Graph.cameraPosition({ z: Math.max(200, Math.min(2000, (rawData.nodes||[]).length*4)) });
+
+/* ------------------ Tube "Verlet" (simple) ------------------ */
+const stringGroup = new THREE.Group(); Graph.scene().add(stringGroup);
+const SPRING_SEGMENTS = 18;
+let verletEnabled = false;
+// store link states using stable string keys: "src::tgt"
+const linkStates = new Map();
+
+function keyFor(src,tgt){ return `${src}::${tgt}`; }
+function otherKey(src,tgt){ return `${tgt}::${src}`; }
+
+function makeInitialPoints(){ const pts=[]; for(let i=0;i<SPRING_SEGMENTS;i++) pts.push(new THREE.Vector3()); return pts; }
+
+function makeLinkState(){ return { points: makeInitialPoints(), meshA:null, meshB:null, colorA:'#ffffff', colorB:'#ffffff', _orig:{} }; }
+
+function disposeMesh(m){ try{ if(!m) return; if(m.geometry) m.geometry.dispose(); if(m.material){ if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose()); else m.material.dispose(); } }catch(e){console.warn('dispose',e);} }
+
+function rebuildTubeGeometry(state){
+  if(state.meshA){ stringGroup.remove(state.meshA); disposeMesh(state.meshA); state.meshA=null; }
+  if(state.meshB){ stringGroup.remove(state.meshB); disposeMesh(state.meshB); state.meshB=null; }
+  const half = Math.floor(SPRING_SEGMENTS/2);
+  const ptsA = state.points.slice(0, half+1);
+  const ptsB = state.points.slice(half, state.points.length);
+  if(ptsA.length>=2){ const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5); const geoA = new THREE.TubeGeometry(curveA, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matA = new THREE.MeshStandardMaterial({ color: state.colorA || '#ffffff' }); state.meshA = new THREE.Mesh(geoA, matA); stringGroup.add(state.meshA); }
+  if(ptsB.length>=2){ const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5); const geoB = new THREE.TubeGeometry(curveB, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matB = new THREE.MeshStandardMaterial({ color: state.colorB || '#ffffff' }); state.meshB = new THREE.Mesh(geoB, matB); stringGroup.add(state.meshB); }
+}
+
+function initLinkStatesFromRaw(){
+  // clear
+  linkStates.forEach((st,k)=>{ if(st.meshA) disposeMesh(st.meshA); if(st.meshB) disposeMesh(st.meshB); });
+  linkStates.clear(); while(stringGroup.children.length){ const c=stringGroup.children[0]; stringGroup.remove(c); try{ disposeMesh(c); }catch(e){} }
+  (rawData.links||[]).forEach(l=>{
+    const src = (typeof l.source === 'object') ? l.source.id : l.source;
+    const tgt = (typeof l.target === 'object') ? l.target.id : l.target;
+    const k = keyFor(src,tgt);
+    const st = makeLinkState();
+    st.colorA = verletEnabled ? (getNodeColor(src) || '#ffffff') : '#ffffff';
+    st.colorB = verletEnabled ? (getNodeColor(tgt) || '#ffffff') : '#ffffff';
+    linkStates.set(k, st);
+    rebuildTubeGeometry(st);
+  });
+}
+
+function getNodeById(id){ return (rawData.nodes||[]).find(n=>n.id===id); }
+function getNodeColor(id){ const n=getNodeById(id); return n ? (n.color||'#ffffff') : '#ffffff'; }
+
+// engine tick — update tube points to match node positions
+Graph.onEngineTick(()=>{
+  linkStates.forEach((st,k)=>{
+    const [src,tgt] = k.split('::');
+    const s = getNodeById(src); const t = getNodeById(tgt);
+    if(!s || !t) return;
+    const sv = new THREE.Vector3(s.x||0,s.y||0,s.z||0);
+    const tv = new THREE.Vector3(t.x||0,t.y||0,t.z||0);
+    for(let i=0;i<SPRING_SEGMENTS;i++) st.points[i].lerpVectors(sv,tv,i/(SPRING_SEGMENTS-1));
+    // set colors according to verletEnabled
+    if(verletEnabled){ st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); }
+    else { st.colorA = st.colorB = '#ffffff'; }
+    rebuildTubeGeometry(st);
+  });
+});
+
+// toggle handler — keep it simple
+const verletToggle = document.getElementById('verletToggle');
+verletToggle.checked = verletEnabled;
+verletToggle.addEventListener('change', (e)=>{
+  verletEnabled = !!e.target.checked;
+  // update existing states immediately
+  linkStates.forEach((st,k)=>{ const [src,tgt] = k.split('::'); st.colorA = verletEnabled ? getNodeColor(src) : '#ffffff'; st.colorB = verletEnabled ? getNodeColor(tgt) : '#ffffff'; rebuildTubeGeometry(st); });
+});
+
+/* ------------------ Node glow utilities ------------------ */
+const originalMaterialState = new Map();
+function setGlow(nodeId, on){
+  Graph.scene().traverse(obj=>{
+    if(obj.isMesh && obj.userData && obj.userData._nodeId === nodeId){
+      try{
+        const mat = obj.material;
+        if(on){
+          if(!originalMaterialState.has(nodeId)){
+            if(mat instanceof THREE.ShaderMaterial){
+              const ca = mat.uniforms && mat.uniforms.colorA ? mat.uniforms.colorA.value.clone() : new THREE.Color(0xff0000);
+              const cb = mat.uniforms && mat.uniforms.colorB ? mat.uniforms.colorB.value.clone() : new THREE.Color(0x0000ff);
+              originalMaterialState.set(nodeId,{type:'shader',colorA:ca,colorB:cb,scale:obj.scale.clone()});
+              if(mat.uniforms && mat.uniforms.colorA) mat.uniforms.colorA.value = new THREE.Color(0xffff66);
+              if(mat.uniforms && mat.uniforms.colorB) mat.uniforms.colorB.value = new THREE.Color(0xffff66);
+            } else {
+              const col = mat.color ? mat.color.clone() : new THREE.Color(0xffffff);
+              const emiss = mat.emissive ? mat.emissive.clone() : new THREE.Color(0x000000);
+              originalMaterialState.set(nodeId,{type:'standard',color:col,emissive:emiss,scale:obj.scale.clone()});
+              if(mat.color) mat.color.set(0xffff66);
+              if(mat.emissive) { mat.emissive.set(0xffff00); mat.emissiveIntensity = 0.9; }
+            }
+            obj.scale.set(obj.scale.x*1.4,obj.scale.y*1.4,obj.scale.z*1.4);
+          }
+        } else {
+          const s = originalMaterialState.get(nodeId);
+          if(s){
+            if(s.type === 'shader'){
+              if(mat.uniforms && mat.uniforms.colorA) mat.uniforms.colorA.value = s.colorA;
+              if(mat.uniforms && mat.uniforms.colorB) mat.uniforms.colorB.value = s.colorB;
+            } else {
+              if(mat.color && s.color) mat.color.copy(s.color);
+              if(mat.emissive && s.emissive) { mat.emissive.copy(s.emissive); mat.emissiveIntensity = 0; }
+            }
+            if(s.scale) obj.scale.copy(s.scale);
+            originalMaterialState.delete(nodeId);
+          }
+        }
+      } catch(e){ console.warn('setGlow error', e); }
+    }
+  });
+}
+
+/* ------------------ Link highlight (temporary) ------------------ */
+function highlightLinkBetween(aId,bId,on){
+  const k1 = keyFor(aId,bId), k2 = keyFor(bId,aId);
+  [k1,k2].forEach(k=>{
+    const st = linkStates.get(k);
+    if(!st) return;
+    if(on){ if(st._origColorA === undefined) st._origColorA = st.colorA; if(st._origColorB === undefined) st._origColorB = st.colorB; st.colorA = st.colorB = '#ffff66'; }
+    else { if(st._origColorA !== undefined) st.colorA = st._origColorA; if(st._origColorB !== undefined) st.colorB = st._origColorB; delete st._origColorA; delete st._origColorB; }
+    rebuildTubeGeometry(st);
+  });
+}
+
+/* ------------------ Speech helpers ------------------ */
+function speakText(text, opts={rate:1.0,pitch:1.0}){
+  return new Promise(resolve=>{
+    if(!('speechSynthesis' in window)){ alert(text); resolve(); return; }
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate = opts.rate || 1.0; utt.pitch = opts.pitch || 1.0;
+    utt.onend = ()=>resolve(); utt.onerror = ()=>resolve();
+    window.speechSynthesis.speak(utt);
+  });
+}
+
+/* ------------------ Connection description ------------------ */
+function connectionDescription(aId,bId){
+  const links = rawData.links || [];
+  const aToB = links.some(l => ((l.source===aId && l.target===bId) || (typeof l.source==='object' && l.source.id===aId && typeof l.target==='object' && l.target.id===bId)) );
+  const bToA = links.some(l => ((l.source===bId && l.target===aId) || (typeof l.source==='object' && l.source.id===bId && typeof l.target==='object' && l.target.id===aId)) );
+  let desc = '';
+  const aTitle = getNodeTitle(aId), bTitle = getNodeTitle(bId);
+  if(aToB && bToA) desc = `${aTitle} and ${bTitle} link to each other.`;
+  else if(aToB) desc = `${aTitle} links to ${bTitle}.`;
+  else if(bToA) desc = `${bTitle} links to ${aTitle}.`;
+  else desc = `${aTitle} and ${bTitle} are connected.`;
+  // shared neighbors (up to 2)
+  const neighborOf = id => { const s=new Set(); (rawData.links||[]).forEach(l=>{ if(l.source===id) s.add(l.target); if(l.target===id) s.add(l.source); }); return s; };
+  const na = neighborOf(aId), nb = neighborOf(bId);
+  const shared = Array.from(na).filter(x=>nb.has(x)).slice(0,2).map(id=>getNodeTitle(id));
+  if(shared.length>0) desc += ` They both link to ${shared.join(' and ')}.`;
+  return desc;
+}
+function getNodeTitle(id){ const n=(rawData.nodes||[]).find(x=>x.id===id); return n ? n.name : id; }
+
+/* ------------------ speakNode + auto-adjacent ------------------ */
+async function speakNode(node, visited=new Set()){
+  if(!node || visited.has(node.id)) return;
+  visited.add(node.id);
+  document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`;
+  setGlow(node.id, true);
+  // cancel queued speech? We append; but start fresh for button
+  await speakText(`${node.name}. ${node.summary || 'No summary available.'}`);
+  setGlow(node.id, false);
+  if(!document.getElementById('readAdjacent').checked) return;
+  // gather neighbors on same edge
+  const neighborIds = new Set();
+  (rawData.links||[]).forEach(l=>{
+    const s = (typeof l.source==='object') ? l.source.id : l.source;
+    const t = (typeof l.target==='object') ? l.target.id : l.target;
+    if(s === node.id && t) neighborIds.add(t);
+    if(t === node.id && s) neighborIds.add(s);
+  });
+  const neighbors = Array.from(neighborIds).map(id => getNodeById(id)).filter(n=>n && !visited.has(n.id));
+  if(neighbors.length===0) return;
+  const next = neighbors[Math.floor(Math.random()*neighbors.length)];
+  const desc = connectionDescription(node.id, next.id);
+  // highlight link while speaking
+  highlightLinkBetween(node.id, next.id, true);
+  await speakText(desc);
+  highlightLinkBetween(node.id, next.id, false);
+  await speakNode(next, visited);
+}
+
+// HUD read button
+document.getElementById('hud-read-summary-btn').addEventListener('click', async ()=>{
+  const sel = Array.from(selectedNodes);
+  if(sel.length === 0){ alert('No node selected.'); return; }
+  const node = (rawData.nodes||[]).find(n=>n.id===sel[0]);
+  if(!node){ alert('Selected node not found.'); return; }
+  if(window.speechSynthesis) window.speechSynthesis.cancel();
+  await speakNode(node, new Set());
+});
+
+/* ------------------ Selection & interactions ------------------ */
+let selectedNodes = new Set();
+
+Graph.onNodeClick((node, event) => {
+  if(window.mKeyDown){ playNodeSequence(node); return; }
+  const shift = event && event.shiftKey;
+  if(shift){ if(selectedNodes.has(node.id)) selectedNodes.delete(node.id); else selectedNodes.add(node.id); }
+  else { selectedNodes.clear(); selectedNodes.add(node.id); }
+  Graph.scene().traverse(obj=>{ if(obj.isMesh && obj.userData && obj.userData._nodeId){ const id = obj.userData._nodeId; obj.scale.set(1,1,1); if(selectedNodes.has(id)) obj.scale.set(1.4,1.4,1.4); } });
+  document.getElementById('hud-status').innerText = `Selected ${selectedNodes.size} node(s).`;
+});
+
+// apply color
+document.getElementById('applyColor').addEventListener('click', ()=>{
+  const color = document.getElementById('colorInput').value;
+  selectedNodes.forEach(nid => { const n = rawData.nodes.find(x=>x.id===nid); if(n) n.color = color; Graph.scene().traverse(obj=>{ if(obj.isMesh && obj.userData && obj.userData._nodeId === nid){ if(obj.material && obj.material.color) obj.material.color.set(color); } }); });
+  // update tube halves
+  linkStates.forEach((st,k)=>{ const [src,tgt]=k.split('::'); st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); rebuildTubeGeometry(st); });
+});
+
+// reset selection
+document.getElementById('resetSelect').addEventListener('click', ()=>{ selectedNodes.clear(); Graph.scene().traverse(obj=>{ if(obj.isMesh && obj.userData && obj.userData._nodeId) obj.scale.set(1,1,1); }); document.getElementById('hud-status').innerText = 'Selection cleared.'; });
+
+// merge nodes (keeps previous behavior)
+document.getElementById('hud-merge-nodes-btn').addEventListener('click', ()=>{
+  const sel = Array.from(selectedNodes); if(sel.length < 2){ alert('Select at least two nodes to merge (Shift+Click).'); return; }
+  const idsToMerge = sel.slice(0,2); const toMerge = idsToMerge.map(id=>rawData.nodes.find(n=>n.id===id)).filter(Boolean); if(toMerge.length<2){ alert('Merge nodes missing'); return; }
+  const mergedId = idsToMerge.join('||'); let avgX=0,avgY=0,avgZ=0; toMerge.forEach(n=>{ avgX += (n.x||0); avgY += (n.y||0); avgZ += (n.z||0); }); avgX/=toMerge.length; avgY/=toMerge.length; avgZ/=toMerge.length;
+  const mergedNode = { id:mergedId, name:mergedId, val: Math.max(...toMerge.map(n=>n.val||12)), mergedArticles:[], mergedSummaries:[], mergedColors: toMerge.slice(0,2).map(n=>n.color||'#ff0000'), color: toMerge[0].color||'#ffffff', x:avgX, y:avgY, z:avgZ };
+  toMerge.forEach(n=>{ mergedNode.mergedArticles.push(...(n.mergedArticles||[n.name||n.id])); mergedNode.mergedSummaries.push(...(n.mergedSummaries||[n.summary||''])); });
+  const mergeSet = new Set(idsToMerge); const rewired = [];
+  (rawData.links||[]).forEach(l=>{ const src = (typeof l.source==='object')?l.source.id:l.source; const tgt = (typeof l.target==='object')?l.target.id:l.target; const newSrc = mergeSet.has(src)?mergedId:src; const newTgt = mergeSet.has(tgt)?mergedId:tgt; if(newSrc===newTgt) return; rewired.push({ source:newSrc, target:newTgt, color: l.color||'#cccccc' }); });
+  const seen = new Set(); const dedup=[]; rewired.forEach(l=>{ const k=`${l.source}>>${l.target}`; if(seen.has(k)) return; seen.add(k); dedup.push(l); });
+  rawData.nodes = (rawData.nodes||[]).filter(n=>!mergeSet.has(n.id)); rawData.nodes.push(mergedNode); rawData.links = dedup;
+  Graph.graphData(rawData); initLinkStatesFromRaw(); Graph.refresh(); selectedNodes.clear(); document.getElementById('hud-status').innerText = `Merged ${idsToMerge.join(', ')} → ${mergedId}`;
+});
+
+/* ------------------ melodic m+click playback (simpler) ------------------ */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let selectedScale = [0,2,3,5,7,9,11]; let selectedOctave = 4; let selectedInstrument = 'sine';
+window.mKeyDown = false; document.addEventListener('keydown', e=>{ if(e.key && e.key.toLowerCase()==='m') window.mKeyDown = true; }); document.addEventListener('keyup', e=>{ if(e.key && e.key.toLowerCase()==='m') window.mKeyDown = false; });
+function letterToNote(ch){ const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ'; const idx = alphabet.indexOf(ch.toUpperCase()); if(idx===-1) return null; return 12*selectedOctave + selectedScale[idx % selectedScale.length]; }
+function playMidi(midi,d=300,vol=0.3){ if(midi==null) return; const o=audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type = selectedInstrument; o.frequency.value = 440 * Math.pow(2,(midi-69)/12); g.gain.value = vol; o.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + d/1000); }
+async function playWord(w,d=180){ for(const ch of w){ playMidi(letterToNote(ch), d, 0.35); await new Promise(r=>setTimeout(r,d)); } }
+async function playNodeSequence(node, visited=new Set()){ if(!node || visited.has(node.id)) return; visited.add(node.id); document.getElementById('portal-display').innerText = node.mergedSummaries ? node.mergedSummaries.join('\n\n') : (node.summary || ''); const orig = node.color; node.color = '#FF00FF'; Graph.refresh(); (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#FF00FF'; l.opacity=1; }}); Graph.refresh(); await playWord(node.name || ''); node.color = orig; (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#cccccc'; l.opacity=0.6; }}); Graph.refresh(); const connected = (rawData.links||[]).filter(l=>l.source===node.id).map(l=> getNodeById(l.target)); for(const n of connected) await playNodeSequence(n, visited); }
+
+/* ------------------ Regen implementation (robust) ------------------ */
+function isTalkPage(title){ if(!title) return false; return /^talk:/i.test(title); }
+async function fetchBacklinks(title, max){
+  const out=[]; let blcontinue=null; try{
+    while(out.length < max){
+      const params = new URLSearchParams({ action:'query', list:'backlinks', bltitle:title, bllimit:'max', format:'json' });
+      if(blcontinue) params.set('blcontinue', blcontinue);
+      const url = 'https://en.wikipedia.org/w/api.php?origin=*' + '&' + params.toString();
+      const res = await fetch(url);
+      if(!res.ok) break;
+      const j = await res.json();
+      const bls = j.query?.backlinks?.map(x=>x.title) || [];
+      out.push(...bls);
+      if(!j.continue?.blcontinue) break; blcontinue = j.continue.blcontinue;
+    }
+  }catch(e){ console.warn('fetchBacklinks error', e); }
+  return out.slice(0, max);
+}
+async function fetchSummary(title){ try{ const res = await fetch('https://en.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(title)); if(!res.ok) return 'No summary available'; const j = await res.json(); return j.extract || 'No summary available'; }catch(e){ console.warn('summary fail', e); return 'No summary available'; } }
+
+async function regenGraph(){
+  const seedText = document.getElementById('seedInput').value.trim();
+  const seeds = seedText ? seedText.split(',').map(s=>s.trim()).filter(Boolean) : [];
+  const limitVal = parseInt(document.getElementById('limitInput').value);
+  const connectorLimit = parseInt(document.getElementById('connectorInput').value) || 20;
+  const limit = isNaN(limitVal) ? null : limitVal;
+
+  document.getElementById('hud-status').innerText = 'Fetching graph...';
+  try{
+    const visited = new Set(); const resultArticles = [];
+    for(const s of seeds) if(!isTalkPage(s) && !visited.has(s)){ resultArticles.push(s); visited.add(s); }
+
+    // collect direct neighbors
+    const directNeighbors = [];
+    if(limit !== null){
+      const queues = [];
+      for(const s of seeds){ if(isTalkPage(s)) { queues.push({seed:s, backlinks:[]}); continue; } const bls = await fetchBacklinks(s, limit||200); queues.push({seed:s, backlinks: bls.filter(b=>!isTalkPage(b))}); }
+      let i=0;
+      while(directNeighbors.length < (limit||0) && queues.some(q=>q.backlinks.length>0)){
+        const q = queues[i % queues.length]; if(q.backlinks.length>0){ const b=q.backlinks.shift(); if(!visited.has(b) && !directNeighbors.includes(b)) directNeighbors.push(b); } i++; }
+    } else {
+      for(const s of seeds){ if(isTalkPage(s)) continue; const bls = await fetchBacklinks(s, 200); for(const b of bls){ if(isTalkPage(b)) continue; if(!visited.has(b) && !directNeighbors.includes(b)) directNeighbors.push(b); } }
+    }
+
+    for(const dn of directNeighbors) if(!visited.has(dn)){ resultArticles.push(dn); visited.add(dn); }
+    for(const dn of directNeighbors){ const bls = await fetchBacklinks(dn, connectorLimit); for(const b of bls){ if(isTalkPage(b)) continue; if(!visited.has(b)){ resultArticles.push(b); visited.add(b); } } }
+
+    const articleSet = new Set(resultArticles.filter(a=>!isTalkPage(a)));
+    const links = [];
+    for(const a of resultArticles){ if(isTalkPage(a)) continue; const bls = await fetchBacklinks(a, 200); for(const b of bls){ if(isTalkPage(b)) continue; if(articleSet.has(b)) links.push({ source: b, target: a, color:'#cccccc' }); } }
+
+    const nodes = [];
+    for(const a of Array.from(articleSet)){
+      const summary = await fetchSummary(a);
+      nodes.push({ id: a, name: a, color:'#ffffff', val:12, summary });
+    }
+
+    // assign seed colors
+    const seedColors = ["#ff0000","#00ff00","#0000ff","#ff00ff","#00ffff","#ffff00","#ff8800","#8800ff","#0088ff","#88ff00","#ff0088","#00ff88"];
+    const seedColorMap = {};
+    seeds.forEach((s,i)=>{ if(!isTalkPage(s)) seedColorMap[s] = seedColors[i % seedColors.length]; });
+    for(const s of seeds){ if(isTalkPage(s)) continue; const n = nodes.find(x=>x.id===s); if(n){ n.color = seedColorMap[s]||'#04B819'; n.val = 36; } }
+
+    // adjacency map
+    const neighborMap = {};
+    links.forEach(l=>{ if(!neighborMap[l.source]) neighborMap[l.source]=[]; neighborMap[l.source].push(l.target); if(!neighborMap[l.target]) neighborMap[l.target]=[]; neighborMap[l.target].push(l.source); });
+
+    // BFS multi-source to color by proximity
+    const distances = {}, owner = {}; const q = [];
+    for(const s of seeds) if(!isTalkPage(s) && articleSet.has(s)){ distances[s]=0; owner[s]=s; q.push(s); }
+    while(q.length>0){ const cur=q.shift(); const d = distances[cur]; const ngh = neighborMap[cur] || []; for(const nb of ngh){ if(distances[nb] === undefined){ distances[nb] = d+1; owner[nb] = owner[cur]; q.push(nb); } } }
+
+    function parseColorToRGB(c){ if(!c) return null; c=c.trim(); if(c.startsWith('#')){ const hex=c.slice(1); if(hex.length===3) return hex.split('').map(h=>parseInt(h+h,16)); return [parseInt(hex.slice(0,2),16), parseInt(hex.slice(2,4),16), parseInt(hex.slice(4,6),16)]; } else if(c.startsWith('rgb')){ const m=c.match(/\d+/g); if(m && m.length>=3) return m.slice(0,3).map(x=>parseInt(x,10)); } return null; }
+    function rgbToString(rgb){ return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`; }
+    function lightenColor(hexOrRgb, percent){ const rgb = parseColorToRGB(hexOrRgb); if(!rgb) return hexOrRgb; let [r,g,b]=rgb; r=Math.min(255,Math.max(0,Math.round(r+percent))); g=Math.min(255,Math.max(0,Math.round(g+percent))); b=Math.min(255,Math.max(0,Math.round(b+percent))); return rgbToString([r,g,b]); }
+
+    for(const n of nodes){ if(seedColorMap[n.id]) continue; const d = distances[n.id]; if(d===undefined){ n.color='#dddddd'; continue; } if(d===0) continue; const nearest = owner[n.id]||null; const base = nearest ? seedColorMap[nearest] : '#04B819'; n.color = lightenColor(base, d * 18); }
+
+    for(const l of links){ const sNode = nodes.find(n=>n.id===l.source); const tNode = nodes.find(n=>n.id===l.target); if(sNode && tNode){ const r1=parseColorToRGB(sNode.color)||[255,255,255]; const r2=parseColorToRGB(tNode.color)||[255,255,255]; l.color = rgbToString([Math.round((r1[0]+r2[0])/2), Math.round((r1[1]+r2[1])/2), Math.round((r1[2]+r2[2])/2)]); } else l.color='#cccccc'; }
+
+    rawData = { nodes, links };
+    window.rawData = rawData;
+    Graph.graphData(rawData);
+    initLinkStatesFromRaw();
+    Graph.refresh();
+    document.getElementById('hud-status').innerText = `Fetched ${nodes.length} nodes, ${links.length} links.`;
+  }catch(e){ console.error('regen error', e); document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)'; }
+}
+
+// wire regen button
+const regenBtn = document.getElementById('regenBtn'); regenBtn.addEventListener('click', ()=>{ regenGraph(); });
+
+// hover behavior
+Graph.onNodeHover(node=>{ if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`; else document.getElementById('portal-display').innerText = ''; });
+
+// initialize
+initLinkStatesFromRaw();
+
+</script>
+</body>
+</html>
