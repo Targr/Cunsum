@@ -1,0 +1,916 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>All Wikipedia Graph (Verlet + Merge + HUD + Read Summary)</title>
+<style>
+  body { margin:0; overflow:hidden; background:#000; }
+  #hud { position:absolute; top:8px; right:8px; color:white; font-family:sans-serif; font-size:13px;
+          background:rgba(0,0,0,0.6); padding:10px; border-radius:8px; z-index:30; width:300px; }
+  #portal-display { position:absolute; top:8px; left:8px; color:white; font-family:sans-serif; font-size:14px; z-index:30; max-width:400px; white-space:pre-wrap; }
+  .btn { padding:6px 8px; margin-right:6px; }
+  .small { font-size:12px; color:#ddd; }
+  #hud input[type="color"] { padding:0; border:none; height:28px; }
+</style>
+</head>
+<body>
+<div id="3d-graph" style="width:100%;height:100%;"></div>
+<div id="portal-display"></div>
+
+<div id="hud">
+  <div><b>Wikipedia Graph Generator</b></div>
+
+  <div style="margin-top:8px;">
+    <label class="small">Seed articles (comma-separated):<br>
+      <input id="seedInput" type="text" style="width:260px;" placeholder="Dog,Cat">
+    </label>
+  </div>
+
+  <div style="margin-top:6px;">
+    <label class="small">Direct-neighbor limit (n = number of articles directly linking to seed(s)):<br>
+      <input id="limitInput" type="number" style="width:90px;" placeholder="20">
+    </label>
+    <label class="small" style="margin-left:8px;">Connector limit (offshoots per direct neighbor):<br>
+      <input id="connectorInput" type="number" value="20" style="width:70px;">
+    </label>
+  </div>
+
+  <div style="margin-top:8px;">
+    <label><input id="verletToggle" type="checkbox"> Enable Verlet physics</label>
+    <div class="small">(Off by default — uncheck for white static edges)</div>
+  </div>
+
+  <div style="margin-top:8px;">
+    <button id="regenBtn" class="btn">Regenerate</button>
+    <button id="resetSelect" class="btn">Clear Selection</button>
+    <button id="hud-merge-nodes-btn" class="btn">Merge Nodes</button>
+    <button id="hud-read-summary-btn" class="btn">Read Summary</button>
+  </div>
+
+  <div style="margin-top:8px;">
+    <label class="small">Color picker for selected:</label><br>
+    <input id="colorInput" type="color" value="#ff0000" style="width:90px;">
+    <button id="applyColor" class="btn">Apply Color</button>
+  </div>
+
+  <div id="hud-status" style="margin-top:8px;color:#04B819;"></div>
+</div>
+
+<!-- three + 3d-force-graph -->
+<script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph"></script>
+<script src="https://unpkg.com/three-spritetext"></script>
+
+<!-- Optional: backend may inject __DATA__ replacement here -->
+<script>
+/* If backend replaces __DATA__ with a JSON literal, this will provide initial graph data.
+   If not replaced, we'll fall back to an empty graph and client-side regen will work. */
+try {
+  /* __DATA__ is expected to be injected by server as a JSON literal without quotes */
+  /* If the backend doesn't inject __DATA__, this will throw and we fallback below */
+  let _tmp = __DATA__;
+  window.rawData = _tmp;
+} catch (e) {
+  window.rawData = { nodes: [], links: [] };
+}
+</script>
+
+<script>
+/* ===== FULL gw8-derived client-side code with all features + Read Summary button ===== */
+
+/* ----- ForceGraph init ----- */
+const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
+    .graphData(window.rawData)
+    .nodeRelSize(4)
+    .nodeLabel(n => {
+        if(n.mergedArticles) {
+            const titles = n.mergedArticles.join(' + ');
+            const summaries = (n.mergedSummaries || []).join('\n\n');
+            return `<b>${titles}</b>\n${summaries}`;
+        }
+        return `<b>${n.name}</b>\n${n.summary || ''}`;
+    })
+    .nodeThreeObject(node => {
+        // If merged node, render half-and-half shader; otherwise normal sprite
+        if(node.mergedColors && Array.isArray(node.mergedColors) && node.mergedColors.length >= 2) {
+            const colorA = new THREE.Color(node.mergedColors[0] || '#ff0000');
+            const colorB = new THREE.Color(node.mergedColors[1] || '#0000ff');
+            const geo = new THREE.SphereGeometry(Math.max(0.8,(node.val||8)/8), 24, 24);
+
+            const mat = new THREE.ShaderMaterial({
+                uniforms: {
+                    colorA: { value: colorA },
+                    colorB: { value: colorB }
+                },
+                vertexShader: `
+                    varying vec3 vPos;
+                    void main() {
+                        vPos = (modelMatrix * vec4(position, 1.0)).xyz;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform vec3 colorA;
+                    uniform vec3 colorB;
+                    varying vec3 vPos;
+                    void main() {
+                        if(vPos.x < 0.0) {
+                            gl_FragColor = vec4(colorA, 1.0);
+                        } else {
+                            gl_FragColor = vec4(colorB, 1.0);
+                        }
+                    }
+                `
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.userData._nodeId = node.id;
+            return mesh;
+        } else {
+            // fallback sprite text for performance & clarity
+            const sprite = new SpriteText(node.name);
+            sprite.color = node.color || '#FFFFFF';
+            sprite.textHeight = (node.val || 12) / 8;
+            return sprite;
+        }
+    })
+    .linkOpacity(0.6)
+    .backgroundColor('#000');
+
+Graph.cameraPosition({ z: Math.max(200, Math.min(2000, (window.rawData.nodes||[]).length*4)) });
+
+/* ----- Audio: m+click to play node sequence ----- */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let selectedScale = [0,2,3,5,7,9,11];
+let selectedOctave = 4;
+let selectedInstrument = 'sine';
+let mKeyDown = false;
+document.addEventListener('keydown', e => { if(e.key && e.key.toLowerCase()==='m') mKeyDown = true; });
+document.addEventListener('keyup', e => { if(e.key && e.key.toLowerCase()==='m') mKeyDown = false; });
+
+function letterToNote(char) {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const idx = alphabet.indexOf(char.toUpperCase());
+    if(idx===-1) return null;
+    return 12*selectedOctave + selectedScale[idx % selectedScale.length];
+}
+function playMidi(midi,duration=300,volume=0.3) {
+    if(midi==null) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = selectedInstrument; o.frequency.value = 440 * Math.pow(2,(midi-69)/12);
+    g.gain.value = volume; o.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime+duration/1000);
+}
+async function playWord(w,d=180) {
+    for(const ch of w) {
+        playMidi(letterToNote(ch),d,0.35);
+        await new Promise(r=>setTimeout(r,d));
+    }
+}
+async function playNodeSequence(node, visited=new Set()) {
+    if(!node || visited.has(node.id)) return;
+    visited.add(node.id);
+    document.getElementById('portal-display').innerText = node.mergedSummaries ? node.mergedSummaries.join('\n\n') : (node.summary || '');
+    const orig = node.color;
+    node.color = '#FF00FF';
+    Graph.refresh();
+    (window.rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#FF00FF'; l.opacity=1; }});
+    Graph.refresh();
+    await playWord(node.name || (node.mergedArticles ? node.mergedArticles[0] : ''), 160);
+    node.color = orig;
+    (window.rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#cccccc'; l.opacity=0.6; }});
+    Graph.refresh();
+    const connected = (window.rawData.links||[]).filter(l=>l.source===node.id).map(l=> (window.rawData.nodes||[]).find(n=>n.id===l.target));
+    for(const n of connected) { await playNodeSequence(n, visited); }
+}
+
+/* ----- Verlet strings: split halves ----- */
+const SPRING_SEGMENTS = 18;
+let DAMPING = 0.985;
+let EDGE_ATTRACT = 0.08;
+let TIME_STEP = 1/60;
+let verletEnabled = false; // default OFF
+
+document.getElementById('verletToggle').checked = false;
+document.getElementById('verletToggle').addEventListener('change', e => {
+    verletEnabled = !!e.target.checked;
+    // update link half-colors accordingly
+    linkStates.forEach((st, key) => {
+        if(!verletEnabled) {
+            st.colorA = '#ffffff'; st.colorB = '#ffffff';
+        } else {
+            const s = getNodeObj(key.source), t = getNodeObj(key.target);
+            st.colorA = (s && s.color) ? s.color : '#88aaff';
+            st.colorB = (t && t.color) ? t.color : '#88aaff';
+        }
+        rebuildTubeGeometry(st);
+    });
+});
+
+/* group for string meshes */
+const stringGroup = new THREE.Group();
+Graph.scene().add(stringGroup);
+
+/* string state builder */
+function makeStringState(src, dst) {
+    const points = [], prev = [], masses = [];
+    for(let i=0;i<SPRING_SEGMENTS;i++) {
+        const t = i/(SPRING_SEGMENTS-1);
+        const p = new THREE.Vector3().lerpVectors(src, dst, t);
+        points.push(p.clone());
+        prev.push(p.clone());
+        masses.push((i===0||i===SPRING_SEGMENTS-1)?0:1);
+    }
+    const restLen = src.distanceTo(dst)/(SPRING_SEGMENTS-1);
+    return {points, prev, masses, restLen, meshA:null, meshB:null, pinned:null, colorA:'#88aaff', colorB:'#88aaff'};
+}
+
+function disposeMesh(m) {
+    try {
+        if(m.geometry) m.geometry.dispose();
+        if(m.material) {
+            if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose());
+            else m.material.dispose();
+        }
+    } catch(e) { console.warn('disposeMesh', e); }
+}
+
+function rebuildTubeGeometry(state) {
+    // remove previous
+    if(state.meshA) { stringGroup.remove(state.meshA); disposeMesh(state.meshA); state.meshA = null; }
+    if(state.meshB) { stringGroup.remove(state.meshB); disposeMesh(state.meshB); state.meshB = null; }
+
+    const half = Math.floor(SPRING_SEGMENTS/2);
+    const ptsA = state.points.slice(0, half+1);
+    const ptsB = state.points.slice(half, state.points.length);
+
+    if(ptsA.length >= 2) {
+        const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5);
+        const geoA = new THREE.TubeGeometry(curveA, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false);
+        const matA = new THREE.MeshStandardMaterial({color: state.colorA || '#88aaff'});
+        state.meshA = new THREE.Mesh(geoA, matA);
+        stringGroup.add(state.meshA);
+    }
+    if(ptsB.length >= 2) {
+        const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5);
+        const geoB = new THREE.TubeGeometry(curveB, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false);
+        const matB = new THREE.MeshStandardMaterial({color: state.colorB || '#88aaff'});
+        state.meshB = new THREE.Mesh(geoB, matB);
+        stringGroup.add(state.meshB);
+    }
+}
+
+function simulateString(state, src, dst) {
+    if(!verletEnabled) {
+        // static string (evenly spaced between endpoints)
+        state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+        for(let i=1;i<SPRING_SEGMENTS-1;i++) {
+            const t = i/(SPRING_SEGMENTS-1);
+            state.points[i].lerpVectors(src, dst, t);
+        }
+        rebuildTubeGeometry(state);
+        return;
+    }
+
+    // Verlet integration (same behavior as earlier)
+    state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+    for(let i=1;i<SPRING_SEGMENTS-1;i++) {
+        if(state.pinned && state.pinned.idx===i) {
+            state.points[i].copy(state.pinned.pos);
+            continue;
+        }
+        const p = state.points[i];
+        const pv = state.prev[i];
+        const vel = p.clone().sub(pv).multiplyScalar(DAMPING);
+        state.prev[i].copy(p);
+        const t = i/(SPRING_SEGMENTS-1);
+        const edgePoint = new THREE.Vector3().lerpVectors(src, dst, t);
+        const toward = edgePoint.sub(p).multiplyScalar(EDGE_ATTRACT);
+        p.add(vel).add(toward.multiplyScalar(TIME_STEP));
+    }
+    for(let iter=0; iter<3; iter++) {
+        for(let i=0;i<SPRING_SEGMENTS-1;i++) {
+            const a = state.points[i], b = state.points[i+1];
+            const diff = b.clone().sub(a);
+            const dist = Math.max(1e-6, diff.length());
+            const err = (dist - state.restLen)/dist;
+            const corr = diff.multiplyScalar(0.5*err);
+            if(state.masses[i] && !(state.pinned && state.pinned.idx===i)) a.add(corr);
+            if(state.masses[i+1] && !(state.pinned && state.pinned.idx===i+1)) b.sub(corr);
+        }
+        state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+    }
+    rebuildTubeGeometry(state);
+}
+
+/* ----- link state map: key is original link object (we'll use a Map with indices) ----- */
+const linkStates = new Map();
+
+function getNodeObj(id) { return (typeof id === 'object') ? id : (window.rawData.nodes || []).find(n=>n.id===id); }
+
+/* initialize link states from rawData */
+function initLinkStatesFromRaw() {
+    linkStates.clear();
+    while(stringGroup.children.length) {
+        const c = stringGroup.children[0];
+        stringGroup.remove(c);
+        disposeMesh(c);
+    }
+    (window.rawData.links || []).forEach((link, idx) => {
+        const s = getNodeObj(link.source), t = getNodeObj(link.target);
+        if(!s || !t) return;
+        const sv = new THREE.Vector3(s.x||0, s.y||0, s.z||0);
+        const tv = new THREE.Vector3(t.x||0, t.y||0, t.z||0);
+        const st = makeStringState(sv, tv);
+        // color halves based on node colors or white if verlet disabled
+        if(!verletEnabled) {
+            st.colorA = '#ffffff'; st.colorB = '#ffffff';
+        } else {
+            st.colorA = s.color || '#88aaff';
+            st.colorB = t.color || '#88aaff';
+        }
+        rebuildTubeGeometry(st);
+        // store with key being index-based object so we can match later
+        linkStates.set({source: link.source, target: link.target}, st);
+    });
+}
+initLinkStatesFromRaw();
+
+/* engine tick to update strings */
+Graph.onEngineTick(() => {
+    linkStates.forEach((state, key) => {
+        const s = getNodeObj(key.source), t = getNodeObj(key.target);
+        if(!s || !t) return;
+        const sv = new THREE.Vector3(s.x||0, s.y||0, s.z||0);
+        const tv = new THREE.Vector3(t.x||0, t.y||0, t.z||0);
+        simulateString(state, sv, tv);
+    });
+});
+
+/* ----- Strumming/pinning behavior (retain original behavior) ----- */
+let mouse = new THREE.Vector2();
+let lastMouse = new THREE.Vector2();
+let mouseSpeed = 0;
+let strumActive = false;
+let activeStrings = new Set();
+
+Graph.renderer().domElement.addEventListener('mousemove', ev => {
+    const rect = Graph.renderer().domElement.getBoundingClientRect();
+    mouse.x = ((ev.clientX - rect.left)/rect.width)*2-1;
+    mouse.y = -((ev.clientY - rect.top)/rect.height)/2;
+    mouseSpeed = Math.sqrt((mouse.x-lastMouse.x)**2 + (mouse.y-lastMouse.y)**2)*60;
+    lastMouse.copy(mouse);
+
+    linkStates.forEach(st => {
+        if(strumActive) {
+            st.points.forEach((p,i) => {
+                if(i===0||i===SPRING_SEGMENTS-1) return;
+                const screenPos = p.clone().project(Graph.camera());
+                const dist = Math.sqrt((mouse.x - screenPos.x)**2 + (mouse.y - screenPos.y)**2);
+                if(dist < 0.05) {
+                    if(!st.pinned) st.pinned = {idx:i, pos:p.clone(), velocity: new THREE.Vector3()};
+                    const mouseWorld = p.clone();
+                    st.pinned.pos.lerp(mouseWorld, 0.4);
+                    activeStrings.add(st);
+                }
+            });
+        }
+    });
+});
+
+document.addEventListener('keydown', ev => { if(ev.key.toLowerCase()==='s') strumActive=true; });
+document.addEventListener('keyup', ev => {
+    if(ev.key.toLowerCase()==='s') strumActive=false;
+    activeStrings.forEach(st => {
+        if(st.pinned) {
+            st.releaseTarget = st.points[st.pinned.idx].clone();
+            st.pinned.springVelocity = new THREE.Vector3();
+        }
+    });
+});
+
+function updateStrings() {
+    activeStrings.forEach(st => {
+        if(st.pinned && !strumActive) {
+            const idx = st.pinned.idx;
+            const p = st.points[idx];
+            const target = st.points[idx];
+            if(!st.pinned.springVelocity) st.pinned.springVelocity = new THREE.Vector3();
+            const k = 0.4;
+            const damping = 0.85;
+            const force = target.clone().sub(p).multiplyScalar(k);
+            st.pinned.springVelocity.add(force);
+            st.pinned.springVelocity.multiplyScalar(damping);
+            p.add(st.pinned.springVelocity);
+            if(p.distanceTo(target) < 0.001) st.pinned = null;
+        }
+    });
+}
+
+const oldTick = Graph.tick;
+Graph.tick = () => { if(oldTick) oldTick(); updateStrings(); };
+
+/* ----- Selection & coloring ----- */
+let selectedNodes = new Set();
+
+function setNodeVisualColor(nodeId, color) {
+    const node = (window.rawData.nodes||[]).find(n=>n.id===nodeId);
+    if(node) node.color = color;
+    Graph.scene().traverse(obj => {
+        if(obj.isMesh && obj.userData && obj.userData._nodeId) {
+            const id = obj.userData._nodeId;
+            if(id === nodeId) {
+                if(obj.material && obj.material.color) obj.material.color.set(color);
+            }
+        }
+    });
+    // update the half-strings for links connected to this node
+    linkStates.forEach((st, key) => {
+        if(key.source === nodeId) {
+            st.colorA = color;
+            rebuildTubeGeometry(st);
+        }
+        if(key.target === nodeId) {
+            st.colorB = color;
+            rebuildTubeGeometry(st);
+        }
+    });
+}
+
+Graph.onNodeClick((node, event) => {
+    // m+click = audio
+    if(mKeyDown) {
+        playNodeSequence(node);
+        return;
+    }
+    const shift = event && event.shiftKey;
+    if(shift) {
+        if(selectedNodes.has(node.id)) selectedNodes.delete(node.id);
+        else selectedNodes.add(node.id);
+    } else {
+        selectedNodes.clear();
+        selectedNodes.add(node.id);
+    }
+    Graph.scene().traverse(obj => {
+        if(obj.isMesh && obj.userData && obj.userData._nodeId) {
+            const id = obj.userData._nodeId;
+            obj.scale.set(1,1,1);
+            if(selectedNodes.has(id)) obj.scale.set(1.4,1.4,1.4);
+        }
+    });
+    document.getElementById('hud-status').innerText = `Selected ${selectedNodes.size} node(s).`;
+});
+
+document.getElementById('applyColor').addEventListener('click', () => {
+    const color = document.getElementById('colorInput').value;
+    selectedNodes.forEach(nid => setNodeVisualColor(nid, color));
+});
+document.getElementById('resetSelect').addEventListener('click', () => {
+    selectedNodes.clear();
+    Graph.scene().traverse(obj => {
+        if(obj.isMesh && obj.userData && obj.userData._nodeId) obj.scale.set(1,1,1);
+    });
+    document.getElementById('hud-status').innerText = 'Selection cleared.';
+});
+
+/* ----- Drag & Merge: merge all overlapped nodes on drag end ----- */
+
+function findMeshByNodeId(nodeId) {
+    let found = null;
+    Graph.scene().traverse(obj => {
+        if(found) return;
+        if(obj.isMesh && obj.userData && obj.userData._nodeId === nodeId) found = obj;
+    });
+    return found;
+}
+
+// Graph provides onNodeDrag and onNodeDragEnd callbacks:
+Graph.onNodeDrag((node) => {
+    // no-op; allow internal drag to move nodes around
+});
+
+/* ----- HUD Button Merge Nodes ----- */
+document.getElementById('hud-merge-nodes-btn').addEventListener('click', () => {
+  try {
+    const selIds = Array.from(selectedNodes);
+    if (selIds.length < 2) {
+      alert('Select at least two nodes to merge (Shift+Click to multi-select).');
+      return;
+    }
+
+    // merge the first two selected IDs
+    const idsToMerge = selIds.slice(0, 2);
+
+    // find the corresponding node objects in rawData
+    const toMerge = idsToMerge
+      .map(id => (window.rawData.nodes||[]).find(n => n.id === id))
+      .filter(Boolean);
+
+    if (toMerge.length < 2) {
+      alert('Could not locate the selected nodes in the dataset.');
+      return;
+    }
+
+    const mergedId = idsToMerge.join('||');
+
+    // Average position (fall back to 0 if unset)
+    let avgX = 0, avgY = 0, avgZ = 0;
+    toMerge.forEach(n => {
+      avgX += (n.x || 0);
+      avgY += (n.y || 0);
+      avgZ += (n.z || 0);
+    });
+    avgX /= toMerge.length; avgY /= toMerge.length; avgZ /= toMerge.length;
+
+    const mergedNode = {
+      id: mergedId,
+      name: mergedId,
+      val: Math.max(...toMerge.map(n => n.val || 12)),
+      mergedArticles: [],
+      mergedSummaries: [],
+      mergedPortals: [],
+      mergedColors: toMerge.slice(0, 2).map(n => n.color || '#ff0000'),
+      color: toMerge[0].color || '#ffffff',
+      x: avgX,
+      y: avgY,
+      z: avgZ
+    };
+
+    // Merge metadata
+    toMerge.forEach(n => {
+      mergedNode.mergedArticles.push(...(n.mergedArticles || [n.name || n.id]));
+      mergedNode.mergedSummaries.push(...(n.mergedSummaries || [n.summary || '']));
+      mergedNode.mergedPortals.push(...(n.mergedPortals || (n.portals ? [n.portals] : [])));
+    });
+
+    // --- Reconnect edges safely (normalize object/string endpoints) ---
+    const mergeSet = new Set(idsToMerge);
+    const rewired = [];
+
+    for (const l of (window.rawData.links || [])) {
+      const srcId = (typeof l.source === 'object') ? l.source.id : l.source;
+      const tgtId = (typeof l.target === 'object') ? l.target.id : l.target;
+
+      const newSrc = mergeSet.has(srcId) ? mergedId : srcId;
+      const newTgt = mergeSet.has(tgtId) ? mergedId : tgtId;
+
+      // Skip self-loops introduced by merging
+      if (newSrc === newTgt) continue;
+
+      rewired.push({ source: newSrc, target: newTgt, color: l.color || '#cccccc' });
+    }
+
+    // De-duplicate parallel edges after rewiring
+    const seen = new Set();
+    const deduped = [];
+    for (const l of rewired) {
+      const key = `${l.source}>>${l.target}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(l);
+    }
+
+    // --- Remove old nodes and add merged node ---
+    const idsToMergeSet = new Set(idsToMerge);
+    window.rawData.nodes = (window.rawData.nodes || []).filter(n => !idsToMergeSet.has(n.id));
+    window.rawData.nodes.push(mergedNode);
+
+    // Replace links with rewired, deduped ones
+    window.rawData.links = deduped;
+
+    // --- Refresh graph & strings ---
+    Graph.graphData(window.rawData);
+    Graph.refresh();
+    initLinkStatesFromRaw();
+
+    // Clear selection (keep Set usage consistent)
+    selectedNodes.clear();
+
+    document.getElementById('hud-status').innerText =
+      `Merged nodes ${idsToMerge.join(', ')} into '${mergedId}'`;
+  } catch (e) {
+    console.error('HUD merge error', e);
+    alert('Merge failed (see console).');
+  }
+});
+
+/* ----- HUD Read Summary Button: show summary (prefers mergedSummaries if merged) ----- */
+document.getElementById('hud-read-summary-btn').addEventListener('click', () => {
+    try {
+        const sel = Array.from(selectedNodes);
+        if(sel.length === 0) {
+            alert('No node selected.');
+            return;
+        }
+        const id = sel[0];
+        const node = (window.rawData.nodes || []).find(n => n.id === id);
+        if(!node) {
+            alert('Selected node not found.');
+            return;
+        }
+        let text = '';
+        if(node.mergedArticles) {
+            text = `${node.name}\n\n${(node.mergedSummaries || []).join('\n\n') || 'No summary available.'}`;
+        } else {
+            text = `${node.name}\n\n${node.summary || 'No summary available.'}`;
+        }
+        alert(text);
+    } catch (e) {
+        console.error('Read summary error', e);
+        alert('Could not read summary (see console).');
+    }
+});
+
+/* ----- HUD client-side regeneration that builds nodes + links (edges) with server semantics ----- */
+
+async function fetchBacklinks(title, max) {
+    const out = [];
+    let blcontinue = null;
+    while(out.length < max) {
+        const params = new URLSearchParams({
+            action: 'query',
+            list: 'backlinks',
+            bltitle: title,
+            bllimit: 'max',
+            format: 'json'
+        });
+        if(blcontinue) params.set('blcontinue', blcontinue);
+        const res = await fetch('https://en.wikipedia.org/w/api.php?origin=*' + '&' + params.toString());
+        const j = await res.json();
+        const bls = j.query?.backlinks?.map(x=>x.title) || [];
+        out.push(...bls);
+        if(!j.continue?.blcontinue) break;
+        blcontinue = j.continue.blcontinue;
+    }
+    return out.slice(0, max);
+}
+
+/* ----- Fetch summary for a given article ----- */
+async function fetchSummary(title) {
+    try {
+        const url = 'https://en.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(title);
+        const res = await fetch(url);
+        if(!res.ok) return 'No summary available';
+        const json = await res.json();
+        return json.extract || 'No summary available';
+    } catch(e) {
+        console.warn('Summary fetch failed for', title, e);
+        return 'No summary available';
+    }
+}
+
+/* Regeneration button */
+document.getElementById('regenBtn').addEventListener('click', async () => {
+    const seedText = document.getElementById('seedInput').value.trim();
+    const seeds = seedText ? seedText.split(',').map(s=>s.trim()).filter(Boolean) : [];
+
+    // FIX: Properly parse limits
+    const limitVal = parseInt(document.getElementById('limitInput').value);
+    const connectorLimit = parseInt(document.getElementById('connectorInput').value) || 20;
+    const limit = isNaN(limitVal) ? null : limitVal;
+
+    document.getElementById('hud-status').innerText = 'Fetching graph...';
+
+    try {
+        let visited = new Set();
+        let resultArticles = [];
+
+        // include seeds
+        for(const s of seeds) {
+            if(!visited.has(s)) {
+                resultArticles.push(s);
+                visited.add(s);
+            }
+        }
+
+        // 1) collect direct neighbors up to limit (across seeds) - ROUND ROBIN
+        let directNeighbors = [];
+        if(limit !== null) {
+            // Round-robin version
+            let backlinkQueues = [];
+            for(const s of seeds) {
+                backlinkQueues.push({ seed: s, backlinks: await fetchBacklinks(s, limit) });
+            }
+
+            let i = 0;
+            while(directNeighbors.length < limit && backlinkQueues.some(q => q.backlinks.length > 0)) {
+                const queue = backlinkQueues[i % backlinkQueues.length];
+                if(queue.backlinks.length > 0) {
+                    const b = queue.backlinks.shift();
+                    if(!visited.has(b) && !directNeighbors.includes(b)) {
+                        directNeighbors.push(b);
+                    }
+                }
+                i++;
+            }
+        } else {
+            // no limit: fetch a reasonable cap per seed (avoid infinite)
+            for(const s of seeds) {
+                const bls = await fetchBacklinks(s, 200);
+                for(const b of bls) {
+                    if(!visited.has(b) && !directNeighbors.includes(b)) directNeighbors.push(b);
+                }
+            }
+        }
+
+        // append direct neighbors
+        for(const dn of directNeighbors) {
+            if(!visited.has(dn)) { resultArticles.push(dn); visited.add(dn); }
+        }
+
+        // 2) per-direct-neighbor fetch up to connectorLimit offshoots
+        for(const dn of directNeighbors) {
+            const bls = await fetchBacklinks(dn, connectorLimit);
+            for(const b of bls) {
+                if(!visited.has(b)) {
+                    resultArticles.push(b); visited.add(b);
+                }
+            }
+        }
+
+        // Build links among resultArticles
+        const articleSet = new Set(resultArticles);
+        const links = [];
+        for(const a of resultArticles) {
+            const bls = await fetchBacklinks(a, 200);
+            for(const b of bls) {
+                if(articleSet.has(b)) {
+                    links.push({ source: b, target: a, color:'#cccccc' });
+                }
+            }
+        }
+
+        // Build nodes with metadata including summary
+        const nodes = [];
+        for(const a of resultArticles) {
+            const summary = await fetchSummary(a);
+            nodes.push({
+                id: a,
+                name: a,
+                color: '#ffffff',
+                val: 12,
+                summary: summary,
+                portals:''
+            });
+        }
+
+        // Seed color map for unique seed colors
+        const seedColors = [
+          "#ff0000", "#00ff00", "#0000ff", "#ff00ff",
+          "#00ffff", "#ffff00", "#ff8800", "#8800ff",
+          "#0088ff", "#88ff00", "#ff0088", "#00ff88"
+        ];
+        const seedColorMap = {};
+        seeds.forEach((title, i) => {
+            seedColorMap[title] = seedColors[i % seedColors.length];
+        });
+
+        // Mark seed nodes (fixed colors & bigger)
+        for(const s of seeds) {
+            const node = nodes.find(n=>n.id===s);
+            if(node) {
+                node.color = seedColorMap[s] || '#04B819';
+                node.val = 36;
+            }
+        }
+
+        // === Heatmap / utility functions ===
+        function lightenColor(hexOrRgb, percent) {
+            // accepts '#rrggbb' or 'rgb(r,g,b)'
+            const rgb = parseColorToRGB(hexOrRgb);
+            if(!rgb) return hexOrRgb;
+            let r = rgb[0] + percent;
+            let g = rgb[1] + percent;
+            let b = rgb[2] + percent;
+            r = Math.min(255, Math.max(0, Math.round(r)));
+            g = Math.min(255, Math.max(0, Math.round(g)));
+            b = Math.min(255, Math.max(0, Math.round(b)));
+            return `rgb(${r},${g},${b})`;
+        }
+
+        function parseColorToRGB(c) {
+            if(!c) return null;
+            c = c.trim();
+            if(c.startsWith('#')) {
+                // #RRGGBB
+                const hex = c.slice(1);
+                if(hex.length === 3) {
+                    return hex.split('').map(h => parseInt(h+h, 16));
+                }
+                return [(parseInt(hex.slice(0,2),16)), (parseInt(hex.slice(2,4),16)), (parseInt(hex.slice(4,6),16))];
+            } else if(c.startsWith('rgb')) {
+                const m = c.match(/\d+/g);
+                if(m && m.length>=3) return m.slice(0,3).map(x=>parseInt(x,10));
+            }
+            return null;
+        }
+
+        function rgbToString(rgb) {
+            return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+        }
+
+        function blendColors(c1, c2, t = 0.5) {
+            const r1 = parseColorToRGB(c1) || [255,255,255];
+            const r2 = parseColorToRGB(c2) || [255,255,255];
+            const blended = [
+                Math.round(r1[0] + (r2[0]-r1[0]) * t),
+                Math.round(r1[1] + (r2[1]-r1[1]) * t),
+                Math.round(r1[2] + (r2[2]-r1[2]) * t)
+            ];
+            return rgbToString(blended);
+        }
+
+        // Build adjacency for BFS (undirected neighbor map)
+        const neighborMap = {};
+        links.forEach(l => {
+            if(!neighborMap[l.source]) neighborMap[l.source] = [];
+            neighborMap[l.source].push(l.target);
+            if(!neighborMap[l.target]) neighborMap[l.target] = [];
+            neighborMap[l.target].push(l.source);
+        });
+
+        // Multi-source BFS to compute distances and owner (nearest seed)
+        const distances = {};
+        const owner = {};
+        const q = [];
+        // initialize with seeds that actually exist in the graph
+        for(const s of seeds) {
+            if(articleSet.has(s)) {
+                distances[s] = 0;
+                owner[s] = s;
+                q.push(s);
+            }
+        }
+        while(q.length > 0) {
+            const cur = q.shift();
+            const d = distances[cur];
+            const ngh = neighborMap[cur] || [];
+            for(const nb of ngh) {
+                if(distances[nb] === undefined) {
+                    distances[nb] = d + 1;
+                    owner[nb] = owner[cur]; // inherit owner seed
+                    q.push(nb);
+                }
+            }
+        }
+
+        // Apply color gradient based on nearest seed color
+        for (const n of nodes) {
+            if (seedColorMap[n.id]) continue;
+            const d = distances[n.id];
+            if (d === undefined) {
+                n.color = '#dddddd';
+                continue;
+            }
+            if (d === 0) continue;
+            const nearestSeed = owner[n.id] || null;
+            const baseColor = nearestSeed ? seedColorMap[nearestSeed] : '#04B819';
+            n.color = lightenColor(baseColor, d * 18);
+        }
+
+        // --- Edge blending: set each link.color to blend of its endpoints ---
+        for(const l of links) {
+            const sNode = nodes.find(n => n.id === l.source);
+            const tNode = nodes.find(n => n.id === l.target);
+            if(sNode && tNode) {
+                l.color = blendColors(sNode.color, tNode.color, 0.5);
+            } else {
+                l.color = '#cccccc';
+            }
+        }
+
+        window.rawData = { nodes, links };
+        Graph.graphData(window.rawData);
+        initLinkStatesFromRaw();
+        Graph.refresh();
+        document.getElementById('hud-status').innerText = `Fetched ${nodes.length} nodes, ${links.length} links.`;
+    } catch(e) {
+        console.error('regen error', e);
+        document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)';
+    }
+});
+
+/* Initialize seed styling on first load */
+(function applySeedStylingInitial() {
+    // no-op — user can regenerate to set seed styling client-side.
+})();
+
+initLinkStatesFromRaw();
+
+/* ----- Hover behavior: show name + summary (no noisy portals) ----- */
+Graph.onNodeHover(node => {
+    if(node) {
+        if(node.mergedSummaries) {
+            document.getElementById('portal-display').innerText = `${node.name}\n\n${node.mergedSummaries.join('\n\n')}`;
+        } else {
+            document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary || ''}`;
+        }
+    } else {
+        document.getElementById('portal-display').innerText = '';
+    }
+});
+
+/* End of script */
+</script>
+</body>
+</html>
