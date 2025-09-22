@@ -1,0 +1,973 @@
+```html
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>All Wikipedia Graph (Verlet + Merge + HUD + Read Summary (TTS) + Auto-Adjacent + Context + Link Glow)</title>
+<style>
+  body { margin:0; overflow:hidden; background:#000; }
+  #hud { position:absolute; top:8px; right:8px; color:white; font-family:sans-serif; font-size:13px;
+          background:rgba(0,0,0,0.75); padding:12px; border-radius:10px; z-index:30; width:420px; }
+  #portal-display { position:absolute; top:8px; left:8px; color:white; font-family:sans-serif; font-size:14px; z-index:30; max-width:560px; white-space:pre-wrap; }
+  .btn { padding:6px 8px; margin-right:6px; }
+  .small { font-size:12px; color:#ddd; }
+  #hud input[type="color"] { padding:0; border:none; height:28px; }
+  #hud .row { margin-top:8px; }
+  #hud .muted { color:#999; font-size:12px; }
+</style>
+</head>
+<body>
+<div id="3d-graph" style="width:100%;height:100%;"></div>
+<div id="portal-display"></div>
+
+<div id="hud">
+  <div><b>Wikipedia Graph Generator</b></div>
+
+  <div class="row">
+    <label class="small">Seed articles (comma-separated):<br>
+      <input id="seedInput" type="text" style="width:380px;" placeholder="Dog,Cat">
+    </label>
+  </div>
+
+  <div class="row">
+    <label class="small">Direct-neighbor limit (n = # articles linking to seed(s)):<br>
+      <input id="limitInput" type="number" style="width:100px;" placeholder="20">
+    </label>
+    <label class="small" style="margin-left:10px;">Connector limit (offshoots per direct neighbor):<br>
+      <input id="connectorInput" type="number" value="20" style="width:90px;">
+    </label>
+  </div>
+
+  <div class="row">
+    <label><input id="verletToggle" type="checkbox"> Enable Verlet physics</label>
+    <div class="muted">(Off by default — uncheck for white static edges)</div>
+  </div>
+
+  <div class="row">
+    <button id="regenBtn" class="btn">Regenerate</button>
+    <button id="resetSelect" class="btn">Clear Selection</button>
+    <button id="hud-merge-nodes-btn" class="btn">Merge Nodes</button>
+    <button id="hud-read-summary-btn" class="btn">Read Summary (TTS)</button>
+    <label style="margin-left:8px;">
+      <input id="readAdjacent" type="checkbox"> <span class="small">Auto-read adjacent</span>
+    </label>
+  </div>
+
+  <div class="row">
+    <label class="small">Color picker for selected:</label><br>
+    <input id="colorInput" type="color" value="#ff0000" style="width:90px;">
+    <button id="applyColor" class="btn">Apply Color</button>
+  </div>
+
+  <div id="hud-status" class="row" style="margin-top:10px;color:#04B819;"></div>
+</div>
+
+<!-- libs -->
+<script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph"></script>
+<script src="https://unpkg.com/three-spritetext"></script>
+
+<script>
+// Global error handler for easier debugging in console
+window.onerror = function(message, source, lineno, colno, error) {
+  console.error("GLOBAL ERROR:", message, "at", source+":"+lineno+":"+colno, error);
+  const hud = document.getElementById('hud-status');
+  if (hud) hud.innerText = "JS ERROR: " + message + " (see console)";
+  return false;
+};
+</script>
+
+<!-- Try to accept server-injected __DATA__ (back-compat). If not present, start empty and client will regenerate. -->
+<script>
+try {
+  window.rawData = __DATA__;
+} catch(e) {
+  window.rawData = { nodes: [], links: [] };
+}
+let rawData = window.rawData;
+</script>
+
+<script>
+/* =========================
+   Full client-side graph code
+   - Nodes are spheres
+   - Read Summary uses TTS
+   - Node glows while reading
+   - Option to auto-read an adjacent node
+   - When reading the intermediary portal/link sentences, the connecting link(s) glow
+   - All gw8 features (audio, merge, verlet) preserved
+   ========================= */
+
+/* ---- Graph initialization ---- */
+const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
+  .graphData(rawData)
+  .nodeRelSize(4)
+  .nodeLabel(n => {
+    if(n.mergedArticles) {
+      const titles = n.mergedArticles.join(' + ');
+      const summaries = (n.mergedSummaries || []).join('\n\n');
+      return `<b>${titles}</b>\n${summaries}`;
+    }
+    return `<b>${n.name}</b>\n${n.summary || ''}`;
+  })
+  .nodeThreeObject(node => {
+    // merged nodes: half-and-half shader; otherwise regular sphere
+    if(node.mergedColors && Array.isArray(node.mergedColors) && node.mergedColors.length >= 2) {
+      const colorA = new THREE.Color(node.mergedColors[0] || '#ff0000');
+      const colorB = new THREE.Color(node.mergedColors[1] || '#0000ff');
+      const geo = new THREE.SphereGeometry(Math.max(0.8,(node.val||12)/8), 24, 24);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: { colorA: { value: colorA }, colorB: { value: colorB } },
+        vertexShader: `
+          varying vec3 vPos;
+          void main() {
+            vPos = (modelMatrix * vec4(position, 1.0)).xyz;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 colorA;
+          uniform vec3 colorB;
+          varying vec3 vPos;
+          void main() {
+            if(vPos.x < 0.0) {
+              gl_FragColor = vec4(colorA, 1.0);
+            } else {
+              gl_FragColor = vec4(colorB, 1.0);
+            }
+          }
+        `
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.userData._nodeId = node.id;
+      return mesh;
+    } else {
+      const geo = new THREE.SphereGeometry(Math.max(0.8, (node.val||12)/8), 16, 16);
+      const mat = new THREE.MeshStandardMaterial({ color: node.color || '#FFFFFF', emissive: new THREE.Color(0x000000), emissiveIntensity: 0 });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.userData._nodeId = node.id;
+      return mesh;
+    }
+  })
+  .linkOpacity(0.6)
+  .backgroundColor('#000');
+
+Graph.cameraPosition({ z: Math.max(200, Math.min(2000, (rawData.nodes||[]).length*4)) });
+
+/* ---- Variables & utilities ---- */
+const stringGroup = new THREE.Group();
+Graph.scene().add(stringGroup);
+
+const SPRING_SEGMENTS = 18;
+let DAMPING = 0.985, EDGE_ATTRACT = 0.08, TIME_STEP = 1/60;
+let verletEnabled = false;
+
+const linkStates = new Map(); // keys are objects {source,target} ; values are state objects
+let selectedNodes = new Set(); // selected node IDs
+
+/* ---- Helper: find linkStates connecting two node IDs (either direction) ---- */
+function findLinkStatesBetween(aId, bId) {
+  const results = [];
+  linkStates.forEach((st, key) => {
+    const s = key.source, t = key.target;
+    if((s === aId && t === bId) || (s === bId && t === aId)) results.push({ key, state: st });
+  });
+  return results;
+}
+
+/* ---- Link glow highlight (temporary) ---- */
+function highlightLinkBetween(aId, bId, on) {
+  const matches = findLinkStatesBetween(aId, bId);
+  matches.forEach(({key, state}) => {
+    if(on) {
+      // store original if not stored
+      if(state._origColorA === undefined) state._origColorA = state.colorA;
+      if(state._origColorB === undefined) state._origColorB = state.colorB;
+      state.colorA = state.colorB = '#ffff66';
+    } else {
+      if(state._origColorA !== undefined) state.colorA = state._origColorA;
+      if(state._origColorB !== undefined) state.colorB = state._origColorB;
+      delete state._origColorA; delete state._origColorB;
+    }
+    try { rebuildTubeGeometry(state); } catch(e){ console.warn('rebuild after highlight failed', e); }
+  });
+}
+
+/* ---- Node glow ---- */
+const originalMaterialState = new Map();
+function setGlow(nodeId, on) {
+  Graph.scene().traverse(obj => {
+    if(obj.isMesh && obj.userData && obj.userData._nodeId === nodeId) {
+      try {
+        const mat = obj.material;
+        if(on) {
+          if(!originalMaterialState.has(nodeId)) {
+            if(mat instanceof THREE.ShaderMaterial) {
+              // store shader uniform colors
+              const ca = (mat.uniforms && mat.uniforms.colorA) ? mat.uniforms.colorA.value.clone() : new THREE.Color(0xff0000);
+              const cb = (mat.uniforms && mat.uniforms.colorB) ? mat.uniforms.colorB.value.clone() : new THREE.Color(0x0000ff);
+              originalMaterialState.set(nodeId, { type:'shader', colorA: ca, colorB: cb, scale: obj.scale.clone() });
+              if(mat.uniforms && mat.uniforms.colorA) mat.uniforms.colorA.value = new THREE.Color(0xffff66);
+              if(mat.uniforms && mat.uniforms.colorB) mat.uniforms.colorB.value = new THREE.Color(0xffff66);
+            } else {
+              const col = mat.color ? mat.color.clone() : new THREE.Color(0xffffff);
+              const emiss = mat.emissive ? mat.emissive.clone() : new THREE.Color(0x000000);
+              originalMaterialState.set(nodeId, { type:'standard', color: col, emissive: emiss, scale: obj.scale.clone() });
+              if(mat.color) mat.color.set(0xffff66);
+              if(mat.emissive) { mat.emissive.set(0xffff00); mat.emissiveIntensity = 0.9; }
+            }
+            obj.scale.set(obj.scale.x*1.5, obj.scale.y*1.5, obj.scale.z*1.5);
+          }
+        } else {
+          const s = originalMaterialState.get(nodeId);
+          if(s) {
+            if(s.type === 'shader') {
+              if(mat.uniforms && mat.uniforms.colorA) mat.uniforms.colorA.value = s.colorA;
+              if(mat.uniforms && mat.uniforms.colorB) mat.uniforms.colorB.value = s.colorB;
+            } else {
+              if(mat.color && s.color) mat.color.copy(s.color);
+              if(mat.emissive && s.emissive) { mat.emissive.copy(s.emissive); mat.emissiveIntensity = 0; }
+            }
+            if(s.scale) obj.scale.copy(s.scale);
+            originalMaterialState.delete(nodeId);
+          }
+        }
+      } catch(e) {
+        console.warn('setGlow failure', e);
+      }
+    }
+  });
+}
+
+/* ---- Speech helpers ---- */
+function speakText(text, opts={rate:1.0,pitch:1.0}) {
+  return new Promise(resolve => {
+    if(!('speechSynthesis' in window)) {
+      alert(text);
+      resolve();
+      return;
+    }
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate = opts.rate || 1.0;
+    utt.pitch = opts.pitch || 1.0;
+    utt.onend = () => resolve();
+    utt.onerror = () => resolve();
+    window.speechSynthesis.speak(utt);
+  });
+}
+
+/* ---- Audio (m+click) melodic playback ---- */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let selectedScale = [0,2,3,5,7,9,11];
+let selectedOctave = 4;
+let selectedInstrument = 'sine';
+let mKeyDown = false;
+document.addEventListener('keydown', e => { if(e.key && e.key.toLowerCase()==='m') mKeyDown = true; });
+document.addEventListener('keyup', e => { if(e.key && e.key.toLowerCase()==='m') mKeyDown = false; });
+
+function letterToNote(char) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const idx = alphabet.indexOf(char.toUpperCase());
+  if(idx===-1) return null;
+  return 12*selectedOctave + selectedScale[idx % selectedScale.length];
+}
+function playMidi(midi,duration=300,volume=0.3) {
+  if(midi==null) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = selectedInstrument; o.frequency.value = 440 * Math.pow(2,(midi-69)/12);
+  g.gain.value = volume; o.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime+duration/1000);
+}
+async function playWord(w,d=180) {
+  for(const ch of w) {
+    playMidi(letterToNote(ch),d,0.35);
+    await new Promise(r=>setTimeout(r,d));
+  }
+}
+
+/* ---- Verlet strings implementation (same reliable code as before) ---- */
+function makeStringState(src, dst) {
+  const points = [], prev = [], masses = [];
+  for(let i=0;i<SPRING_SEGMENTS;i++) {
+    const t = i/(SPRING_SEGMENTS-1);
+    const p = new THREE.Vector3().lerpVectors(src, dst, t);
+    points.push(p.clone());
+    prev.push(p.clone());
+    masses.push((i===0||i===SPRING_SEGMENTS-1)?0:1);
+  }
+  const restLen = src.distanceTo(dst)/(SPRING_SEGMENTS-1);
+  return {points, prev, masses, restLen, meshA:null, meshB:null, pinned:null, colorA:'#88aaff', colorB:'#88aaff'};
+}
+
+function disposeMesh(m) {
+  try {
+    if(m.geometry) m.geometry.dispose();
+    if(m.material) {
+      if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose());
+      else m.material.dispose();
+    }
+  } catch(e) { console.warn('disposeMesh', e); }
+}
+
+function rebuildTubeGeometry(state) {
+  if(state.meshA) { stringGroup.remove(state.meshA); disposeMesh(state.meshA); state.meshA = null; }
+  if(state.meshB) { stringGroup.remove(state.meshB); disposeMesh(state.meshB); state.meshB = null; }
+
+  const half = Math.floor(SPRING_SEGMENTS/2);
+  const ptsA = state.points.slice(0, half+1);
+  const ptsB = state.points.slice(half, state.points.length);
+
+  if(ptsA.length >= 2) {
+    const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5);
+    const geoA = new THREE.TubeGeometry(curveA, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false);
+    const matA = new THREE.MeshStandardMaterial({color: state.colorA || '#88aaff'});
+    state.meshA = new THREE.Mesh(geoA, matA);
+    stringGroup.add(state.meshA);
+  }
+  if(ptsB.length >= 2) {
+    const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5);
+    const geoB = new THREE.TubeGeometry(curveB, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false);
+    const matB = new THREE.MeshStandardMaterial({color: state.colorB || '#88aaff'});
+    state.meshB = new THREE.Mesh(geoB, matB);
+    stringGroup.add(state.meshB);
+  }
+}
+
+function simulateString(state, src, dst) {
+  if(!verletEnabled) {
+    state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+    for(let i=1;i<SPRING_SEGMENTS-1;i++) {
+      const t = i/(SPRING_SEGMENTS-1);
+      state.points[i].lerpVectors(src, dst, t);
+    }
+    rebuildTubeGeometry(state);
+    return;
+  }
+
+  state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+  for(let i=1;i<SPRING_SEGMENTS-1;i++) {
+    if(state.pinned && state.pinned.idx===i) {
+      state.points[i].copy(state.pinned.pos);
+      continue;
+    }
+    const p = state.points[i];
+    const pv = state.prev[i];
+    const vel = p.clone().sub(pv).multiplyScalar(DAMPING);
+    state.prev[i].copy(p);
+    const t = i/(SPRING_SEGMENTS-1);
+    const edgePoint = new THREE.Vector3().lerpVectors(src, dst, t);
+    const toward = edgePoint.sub(p).multiplyScalar(EDGE_ATTRACT);
+    p.add(vel).add(toward.multiplyScalar(TIME_STEP));
+  }
+
+  for(let iter=0; iter<3; iter++) {
+    for(let i=0;i<SPRING_SEGMENTS-1;i++) {
+      const a = state.points[i], b = state.points[i+1];
+      const diff = b.clone().sub(a);
+      const dist = Math.max(1e-6, diff.length());
+      const err = (dist - state.restLen)/dist;
+      const corr = diff.multiplyScalar(0.5*err);
+      if(state.masses[i] && !(state.pinned && state.pinned.idx===i)) a.add(corr);
+      if(state.masses[i+1] && !(state.pinned && state.pinned.idx===i+1)) b.sub(corr);
+    }
+    state.points[0].copy(src); state.points[SPRING_SEGMENTS-1].copy(dst);
+  }
+  rebuildTubeGeometry(state);
+}
+
+/* ---- linkStates init ---- */
+function getNodeObj(id) { return (typeof id === 'object') ? id : (rawData.nodes || []).find(n => n.id === id); }
+
+function initLinkStatesFromRaw() {
+  linkStates.clear();
+  while(stringGroup.children.length) {
+    const c = stringGroup.children[0];
+    stringGroup.remove(c);
+    disposeMesh(c);
+  }
+  (rawData.links || []).forEach(link => {
+    const s = getNodeObj(link.source), t = getNodeObj(link.target);
+    if(!s || !t) return;
+    const sv = new THREE.Vector3(s.x||0, s.y||0, s.z||0);
+    const tv = new THREE.Vector3(t.x||0, t.y||0, t.z||0);
+    const st = makeStringState(sv, tv);
+    if(!verletEnabled) { st.colorA = '#ffffff'; st.colorB = '#ffffff'; }
+    else { st.colorA = s.color || '#88aaff'; st.colorB = t.color || '#88aaff'; }
+    rebuildTubeGeometry(st);
+    // store using a lightweight key object
+    linkStates.set({ source: link.source, target: link.target }, st);
+  });
+}
+initLinkStatesFromRaw();
+
+Graph.onEngineTick(() => {
+  linkStates.forEach((state, key) => {
+    const s = getNodeObj(key.source), t = getNodeObj(key.target);
+    if(!s || !t) return;
+    const sv = new THREE.Vector3(s.x||0, s.y||0, s.z||0);
+    const tv = new THREE.Vector3(t.x||0, t.y||0, t.z||0);
+    simulateString(state, sv, tv);
+  });
+});
+
+/* ----- Strumming/pinning behavior ----- */
+let mouse = new THREE.Vector2(), lastMouse = new THREE.Vector2(), mouseSpeed = 0;
+let strumActive = false, activeStrings = new Set();
+
+Graph.renderer().domElement.addEventListener('mousemove', ev => {
+  const rect = Graph.renderer().domElement.getBoundingClientRect();
+  mouse.x = ((ev.clientX - rect.left)/rect.width)*2-1;
+  mouse.y = -((ev.clientY - rect.top)/rect.height)/2;
+  mouseSpeed = Math.sqrt((mouse.x-lastMouse.x)**2 + (mouse.y-lastMouse.y)**2)*60;
+  lastMouse.copy(mouse);
+
+  linkStates.forEach(st => {
+    if(strumActive) {
+      st.points.forEach((p,i) => {
+        if(i===0||i===SPRING_SEGMENTS-1) return;
+        const screenPos = p.clone().project(Graph.camera());
+        const dist = Math.sqrt((mouse.x - screenPos.x)**2 + (mouse.y - screenPos.y)**2);
+        if(dist < 0.05) {
+          if(!st.pinned) st.pinned = { idx:i, pos:p.clone(), velocity: new THREE.Vector3() };
+          const mouseWorld = p.clone();
+          st.pinned.pos.lerp(mouseWorld, 0.4);
+          activeStrings.add(st);
+        }
+      });
+    }
+  });
+});
+
+document.addEventListener('keydown', ev => { if(ev.key.toLowerCase()==='s') strumActive=true; });
+document.addEventListener('keyup', ev => {
+  if(ev.key.toLowerCase()==='s') strumActive=false;
+  activeStrings.forEach(st => {
+    if(st.pinned) {
+      st.releaseTarget = st.points[st.pinned.idx].clone();
+      st.pinned.springVelocity = new THREE.Vector3();
+    }
+  });
+});
+
+function updateStrings() {
+  activeStrings.forEach(st => {
+    if(st.pinned && !strumActive) {
+      const idx = st.pinned.idx;
+      const p = st.points[idx];
+      const target = st.points[idx];
+      if(!st.pinned.springVelocity) st.pinned.springVelocity = new THREE.Vector3();
+      const k = 0.4, damping = 0.85;
+      const force = target.clone().sub(p).multiplyScalar(k);
+      st.pinned.springVelocity.add(force);
+      st.pinned.springVelocity.multiplyScalar(damping);
+      p.add(st.pinned.springVelocity);
+      if(p.distanceTo(target) < 0.001) st.pinned = null;
+    }
+  });
+}
+const oldTick = Graph.tick;
+Graph.tick = () => { if(oldTick) oldTick(); updateStrings(); };
+
+/* ---- Selection & UI interactions ---- */
+function setNodeVisualColor(nodeId, color) {
+  const node = (rawData.nodes||[]).find(n=>n.id===nodeId);
+  if(node) node.color = color;
+  Graph.scene().traverse(obj => {
+    if(obj.isMesh && obj.userData && obj.userData._nodeId) {
+      const id = obj.userData._nodeId;
+      if(id === nodeId) {
+        if(obj.material && obj.material.color) obj.material.color.set(color);
+      }
+    }
+  });
+  linkStates.forEach((st, key) => {
+    if(key.source === nodeId) { st.colorA = color; rebuildTubeGeometry(st); }
+    if(key.target === nodeId) { st.colorB = color; rebuildTubeGeometry(st); }
+  });
+}
+
+Graph.onNodeClick((node, event) => {
+  if(mKeyDown) { playNodeSequence(node); return; } // m+click triggers audio traversal
+  const shift = event && event.shiftKey;
+  if(shift) {
+    if(selectedNodes.has(node.id)) selectedNodes.delete(node.id);
+    else selectedNodes.add(node.id);
+  } else {
+    selectedNodes.clear();
+    selectedNodes.add(node.id);
+  }
+  Graph.scene().traverse(obj => {
+    if(obj.isMesh && obj.userData && obj.userData._nodeId) {
+      const id = obj.userData._nodeId;
+      obj.scale.set(1,1,1);
+      if(selectedNodes.has(id)) obj.scale.set(1.4,1.4,1.4);
+    }
+  });
+  document.getElementById('hud-status').innerText = `Selected ${selectedNodes.size} node(s).`;
+});
+
+document.getElementById('applyColor').addEventListener('click', () => {
+  const color = document.getElementById('colorInput').value;
+  selectedNodes.forEach(nid => setNodeVisualColor(nid, color));
+});
+document.getElementById('resetSelect').addEventListener('click', () => {
+  selectedNodes.clear();
+  Graph.scene().traverse(obj => { if(obj.isMesh && obj.userData && obj.userData._nodeId) obj.scale.set(1,1,1); });
+  document.getElementById('hud-status').innerText = 'Selection cleared.';
+});
+
+/* ---- Merge nodes (HUD) ---- */
+document.getElementById('hud-merge-nodes-btn').addEventListener('click', () => {
+  try {
+    const selIds = Array.from(selectedNodes);
+    if (selIds.length < 2) { alert('Select at least two nodes to merge (Shift+Click).'); return; }
+    const idsToMerge = selIds.slice(0,2);
+    const toMerge = idsToMerge.map(id => (rawData.nodes||[]).find(n => n.id === id)).filter(Boolean);
+    if(toMerge.length < 2) { alert('Could not locate selected nodes'); return; }
+    const mergedId = idsToMerge.join('||');
+    let avgX=0, avgY=0, avgZ=0;
+    toMerge.forEach(n => { avgX += (n.x||0); avgY += (n.y||0); avgZ += (n.z||0); });
+    avgX/=toMerge.length; avgY/=toMerge.length; avgZ/=toMerge.length;
+    const mergedNode = { id: mergedId, name: mergedId, val: Math.max(...toMerge.map(n=>n.val||12)),
+                         mergedArticles: [], mergedSummaries: [], mergedPortals: [], mergedColors: toMerge.slice(0,2).map(n=>n.color||'#ff0000'),
+                         color: toMerge[0].color||'#ffffff', x:avgX, y:avgY, z:avgZ };
+    toMerge.forEach(n => {
+      mergedNode.mergedArticles.push(...(n.mergedArticles || [n.name || n.id]));
+      mergedNode.mergedSummaries.push(...(n.mergedSummaries || [n.summary || '']));
+      mergedNode.mergedPortals.push(...(n.mergedPortals || (n.portals ? [n.portals] : [])));
+    });
+    const mergeSet = new Set(idsToMerge);
+    const rewired = [];
+    for(const l of (rawData.links||[])) {
+      const srcId = (typeof l.source === 'object') ? l.source.id : l.source;
+      const tgtId = (typeof l.target === 'object') ? l.target.id : l.target;
+      const newSrc = mergeSet.has(srcId) ? mergedId : srcId;
+      const newTgt = mergeSet.has(tgtId) ? mergedId : tgtId;
+      if(newSrc === newTgt) continue;
+      rewired.push({ source: newSrc, target: newTgt, color: l.color || '#cccccc' });
+    }
+    const seen = new Set(), deduped = [];
+    for(const l of rewired) {
+      const key = `${l.source}>>${l.target}`;
+      if(seen.has(key)) continue;
+      seen.add(key); deduped.push(l);
+    }
+    rawData.nodes = (rawData.nodes || []).filter(n => !mergeSet.has(n.id));
+    rawData.nodes.push(mergedNode);
+    rawData.links = deduped;
+    Graph.graphData(rawData);
+    Graph.refresh();
+    initLinkStatesFromRaw();
+    selectedNodes.clear();
+    document.getElementById('hud-status').innerText = `Merged ${idsToMerge.join(', ')} → ${mergedId}`;
+  } catch(e) { console.error('merge', e); alert('Merge failed (see console)'); }
+});
+
+/* ---- TTS reading with auto-adjacent and context + link glow support ---- */
+
+/*
+  speakNode(node, visited):
+    - glow node
+    - speak node.name + summary
+    - unglow node
+    - if auto-adjacent checked:
+        - choose random neighbor not visited
+        - compute context sentences in source (prev/link/next) where link to neighbor resides
+        - while speaking those sentences, highlight the connecting link(s)
+        - recursively speakNode(next)
+*/
+
+async function speakNode(node, visited = new Set()) {
+  if(!node || visited.has(node.id)) return;
+  visited.add(node.id);
+
+  // show and glow
+  document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary || ''}`;
+  setGlow(node.id, true);
+
+  // speak title + summary
+  const textToSpeak = `${node.name}. ${node.summary || 'No summary available.'}`;
+  await speakText(textToSpeak, { rate: 1.0, pitch: 1.0 });
+
+  // stop glow
+  setGlow(node.id, false);
+
+  // if auto-adjacent disabled, stop
+  if(!document.getElementById('readAdjacent').checked) return;
+
+  // find neighbors (connected by links). Prefer outgoing (source === node.id)
+  const neighborIds = new Set();
+  (rawData.links || []).forEach(l => {
+    if(l.source === node.id && l.target) neighborIds.add(l.target);
+    if(l.target === node.id && l.source) neighborIds.add(l.source);
+  });
+
+  // convert to list, find not visited
+  const neighbors = Array.from(neighborIds)
+    .map(id => rawData.nodes.find(n => n.id === id))
+    .filter(n => n && !visited.has(n.id));
+
+  if(neighbors.length === 0) return;
+
+  // pick a random neighbor
+  const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+
+  // get context sentences from node's article where a link to next exists
+  const ctx = await getLinkContext(node.id, next.id);
+  if(ctx && ctx.length > 0) {
+    // highlight the connecting link(s) while reading the context sentences
+    highlightLinkBetween(node.id, next.id, true);
+    for(const s of ctx) {
+      if(s && s.trim()) {
+        await speakText(s.trim(), { rate: 1.0, pitch: 1.0 });
+      }
+    }
+    highlightLinkBetween(node.id, next.id, false);
+  }
+
+  // recursively read the neighbor
+  await speakNode(next, visited);
+}
+
+/* ---- HUD Read Summary binding ---- */
+document.getElementById('hud-read-summary-btn').addEventListener('click', async () => {
+  const sel = Array.from(selectedNodes);
+  if(sel.length === 0) { alert('No node selected.'); return; }
+  const id = sel[0];
+  const node = (rawData.nodes || []).find(n => n.id === id);
+  if(!node) { alert('Selected node not found.'); return; }
+  // Cancel any ongoing speech so the user action starts fresh
+  if('speechSynthesis' in window) window.speechSynthesis.cancel();
+  await speakNode(node, new Set());
+});
+
+/* ---- getLinkContext: fetch full mobile-sections for source and extract sentences near anchor to target ---- */
+
+async function fetchFullHtmlForNode(node) {
+  if(!node) return;
+  if(node._fullHtmlFetched) return;
+  node._fullHtmlFetched = true;
+  node._fullHtml = null;
+  node._paragraphs = [];
+  try {
+    const url = 'https://en.wikipedia.org/api/rest_v1/page/mobile-sections/' + encodeURIComponent(node.name);
+    const res = await fetch(url);
+    if(!res.ok) { node._fullHtml = null; node._paragraphs = []; return; }
+    const j = await res.json();
+    let html = '';
+    if(j.lead && j.lead.sections) j.lead.sections.forEach(s => { if(s.text) html += s.text; });
+    if(j.remaining && j.remaining.sections) j.remaining.sections.forEach(s => { if(s.text) html += s.text; });
+    node._fullHtml = html;
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const paras = Array.from(doc.querySelectorAll('p, li'));
+    node._paragraphs = paras.map(p => ({ html: p.innerHTML || '', text: (p.textContent || '').trim() }));
+  } catch(e) {
+    console.warn('fetchFullHtmlForNode failed for', node.name, e);
+    node._fullHtml = null; node._paragraphs = [];
+  }
+}
+
+function normalizeTitleForCompare(title) {
+  if(!title) return '';
+  return title.replace(/_/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+}
+
+function extractTitleFromHref(href) {
+  if(!href) return null;
+  try {
+    const m = href.match(/(?:\/wiki\/|[?&]title=)([^#?]+)/i);
+    if(m && m[1]) return decodeURIComponent(m[1]).replace(/_/g,' ').trim().toLowerCase();
+    const url = new URL(href, window.location.origin);
+    const parts = url.pathname.split('/');
+    return decodeURIComponent(parts[parts.length-1]).replace(/_/g,' ').trim().toLowerCase();
+  } catch(e) {
+    try { return decodeURIComponent(href).replace(/_/g,' ').trim().toLowerCase(); } catch(_) { return href.toLowerCase(); }
+  }
+}
+
+function splitSentences(text) {
+  if(!text) return [];
+  const matches = text.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g);
+  if(!matches) return [text];
+  return matches.map(s => s.trim()).filter(Boolean);
+}
+
+/*
+  getLinkContext(sourceTitle, targetTitle)
+    -> returns array of sentences [prev, linkSentence, next] (some may be absent)
+*/
+async function getLinkContext(sourceTitle, targetTitle) {
+  const sourceNode = (rawData.nodes || []).find(n => n.id === sourceTitle);
+  if(!sourceNode) return null;
+  await fetchFullHtmlForNode(sourceNode);
+  if(!sourceNode._paragraphs || sourceNode._paragraphs.length === 0) return null;
+  const targetNorm = normalizeTitleForCompare(targetTitle);
+
+  for(const p of sourceNode._paragraphs) {
+    if(!p.html) continue;
+    try {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString('<div>' + p.html + '</div>', 'text/html');
+      const anchors = Array.from(doc.querySelectorAll('a'));
+      let anchorFound = null;
+      for(const a of anchors) {
+        const href = a.getAttribute('href') || '';
+        const candidate = extractTitleFromHref(href);
+        if(candidate && candidate === targetNorm) { anchorFound = a; break; }
+      }
+      if(!anchorFound) {
+        for(const a of anchors) {
+          const text = (a.textContent || '').trim().toLowerCase();
+          if(text && (targetNorm.includes(text) || text.includes(targetNorm))) { anchorFound = a; break; }
+        }
+      }
+      if(anchorFound) {
+        const paraText = doc.body.textContent || '';
+        const sentences = splitSentences(paraText);
+        const anchorText = (anchorFound.textContent || '').trim();
+        let idx = -1;
+        if(anchorText) idx = sentences.findIndex(s => s.includes(anchorText));
+        if(idx === -1) idx = sentences.findIndex(s => s.toLowerCase().includes(targetNorm));
+        if(idx === -1) idx = Math.floor(sentences.length/2);
+        const prev = sentences[idx-1] || '';
+        const linkSent = sentences[idx] || '';
+        const next = sentences[idx+1] || '';
+        const out = [];
+        if(prev && prev.trim()) out.push(prev.trim());
+        if(linkSent && linkSent.trim()) out.push(linkSent.trim());
+        if(next && next.trim()) out.push(next.trim());
+        return out;
+      }
+    } catch(e) {
+      console.warn('getLinkContext parse failed for', sourceNode.name, e);
+      continue;
+    }
+  }
+
+  return null;
+}
+
+/* ---- playNodeSequence melodic traversal (m+click) ---- */
+async function playNodeSequence(node, visited=new Set()) {
+  if(!node || visited.has(node.id)) return;
+  visited.add(node.id);
+  document.getElementById('portal-display').innerText = node.mergedSummaries ? node.mergedSummaries.join('\n\n') : (node.summary || '');
+  const orig = node.color;
+  node.color = '#FF00FF';
+  Graph.refresh();
+  (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#FF00FF'; l.opacity=1; }});
+  Graph.refresh();
+  await playWord(node.name || (node.mergedArticles ? node.mergedArticles[0] : ''), 160);
+  node.color = orig;
+  (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#cccccc'; l.opacity=0.6; }});
+  Graph.refresh();
+  const connected = (rawData.links||[]).filter(l=>l.source===node.id).map(l=> (rawData.nodes||[]).find(n=>n.id===l.target));
+  for(const n of connected) { await playNodeSequence(n, visited); }
+}
+
+/* ---- Regeneration (client-side) with Talk: filter preserved ---- */
+function isTalkPage(title) { if(!title) return false; return /^talk:/i.test(title); }
+
+async function fetchBacklinks(title, max) {
+  const out = [];
+  let blcontinue = null;
+  while(out.length < max) {
+    const params = new URLSearchParams({
+      action: 'query',
+      list: 'backlinks',
+      bltitle: title,
+      bllimit: 'max',
+      format: 'json'
+    });
+    if(blcontinue) params.set('blcontinue', blcontinue);
+    const res = await fetch('https://en.wikipedia.org/w/api.php?origin=*' + '&' + params.toString());
+    const j = await res.json();
+    const bls = j.query?.backlinks?.map(x=>x.title) || [];
+    out.push(...bls);
+    if(!j.continue?.blcontinue) break;
+    blcontinue = j.continue.blcontinue;
+  }
+  return out.slice(0, max);
+}
+
+async function fetchSummary(title) {
+  try {
+    const url = 'https://en.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(title);
+    const res = await fetch(url);
+    if(!res.ok) return 'No summary available';
+    const json = await res.json();
+    return json.extract || 'No summary available';
+  } catch(e) { console.warn('summary fetch failed', e); return 'No summary available'; }
+}
+
+document.getElementById('regenBtn').addEventListener('click', async () => {
+  const seedText = document.getElementById('seedInput').value.trim();
+  const seeds = seedText ? seedText.split(',').map(s=>s.trim()).filter(Boolean) : [];
+  const limitVal = parseInt(document.getElementById('limitInput').value);
+  const connectorLimit = parseInt(document.getElementById('connectorInput').value) || 20;
+  const limit = isNaN(limitVal) ? null : limitVal;
+  document.getElementById('hud-status').innerText = 'Fetching graph...';
+  try {
+    let visited = new Set();
+    let resultArticles = [];
+    for(const s of seeds) { if(isTalkPage(s)) continue; if(!visited.has(s)) { resultArticles.push(s); visited.add(s); } }
+
+    let directNeighbors = [];
+    if(limit !== null) {
+      let backlinkQueues = [];
+      for(const s of seeds) {
+        if(isTalkPage(s)) { backlinkQueues.push({seed:s, backlinks:[]}); continue; }
+        const bls = await fetchBacklinks(s, limit || 200);
+        backlinkQueues.push({ seed: s, backlinks: bls.filter(b => !isTalkPage(b)) });
+      }
+      let i = 0;
+      while(directNeighbors.length < (limit||0) && backlinkQueues.some(q => q.backlinks.length > 0)) {
+        const queue = backlinkQueues[i % backlinkQueues.length];
+        if(queue.backlinks.length > 0) {
+          const b = queue.backlinks.shift();
+          if(!visited.has(b) && !directNeighbors.includes(b)) directNeighbors.push(b);
+        }
+        i++;
+      }
+    } else {
+      for(const s of seeds) {
+        if(isTalkPage(s)) continue;
+        const bls = await fetchBacklinks(s, 200);
+        for(const b of bls) {
+          if(isTalkPage(b)) continue;
+          if(!visited.has(b) && !directNeighbors.includes(b)) directNeighbors.push(b);
+        }
+      }
+    }
+
+    for(const dn of directNeighbors) { if(!visited.has(dn)) { resultArticles.push(dn); visited.add(dn); } }
+
+    for(const dn of directNeighbors) {
+      const bls = await fetchBacklinks(dn, connectorLimit);
+      for(const b of bls) {
+        if(isTalkPage(b)) continue;
+        if(!visited.has(b)) { resultArticles.push(b); visited.add(b); }
+      }
+    }
+
+    const articleSet = new Set(resultArticles.filter(a => !isTalkPage(a)));
+    const links = [];
+    for(const a of resultArticles) {
+      if(isTalkPage(a)) continue;
+      const bls = await fetchBacklinks(a, 200);
+      for(const b of bls) {
+        if(isTalkPage(b)) continue;
+        if(articleSet.has(b)) links.push({ source: b, target: a, color:'#cccccc' });
+      }
+    }
+
+    const nodes = [];
+    for(const a of Array.from(articleSet)) {
+      const summary = await fetchSummary(a);
+      nodes.push({ id: a, name: a, color: '#ffffff', val: 12, summary: summary, portals:'' });
+    }
+
+    // seed colors
+    const seedColors = ["#ff0000","#00ff00","#0000ff","#ff00ff","#00ffff","#ffff00","#ff8800","#8800ff","#0088ff","#88ff00","#ff0088","#00ff88"];
+    const seedColorMap = {};
+    seeds.forEach((title,i)=>{ if(!isTalkPage(title)) seedColorMap[title] = seedColors[i % seedColors.length]; });
+
+    for(const s of seeds) {
+      if(isTalkPage(s)) continue;
+      const node = nodes.find(n=>n.id===s);
+      if(node) { node.color = seedColorMap[s] || '#04B819'; node.val = 36; }
+    }
+
+    // adjacency for BFS
+    const neighborMap = {};
+    links.forEach(l => {
+      if(!neighborMap[l.source]) neighborMap[l.source] = [];
+      neighborMap[l.source].push(l.target);
+      if(!neighborMap[l.target]) neighborMap[l.target] = [];
+      neighborMap[l.target].push(l.source);
+    });
+
+    // BFS multi-source
+    const distances = {}, owner = {};
+    const q = [];
+    for(const s of seeds) {
+      if(isTalkPage(s)) continue;
+      if(articleSet.has(s)) { distances[s] = 0; owner[s] = s; q.push(s); }
+    }
+    while(q.length > 0) {
+      const cur = q.shift();
+      const d = distances[cur];
+      const ngh = neighborMap[cur] || [];
+      for(const nb of ngh) {
+        if(distances[nb] === undefined) { distances[nb] = d+1; owner[nb] = owner[cur]; q.push(nb); }
+      }
+    }
+
+    function parseColorToRGB(c) {
+      if(!c) return null;
+      c = c.trim();
+      if(c.startsWith('#')) {
+        const hex = c.slice(1);
+        if(hex.length===3) return hex.split('').map(h => parseInt(h+h,16));
+        return [parseInt(hex.slice(0,2),16), parseInt(hex.slice(2,4),16), parseInt(hex.slice(4,6),16)];
+      } else if(c.startsWith('rgb')) {
+        const m = c.match(/\d+/g); if(m && m.length>=3) return m.slice(0,3).map(x=>parseInt(x,10));
+      }
+      return null;
+    }
+    function rgbToString(rgb) { return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`; }
+    function lightenColor(hexOrRgb, percent) {
+      const rgb = parseColorToRGB(hexOrRgb);
+      if(!rgb) return hexOrRgb;
+      let [r,g,b] = rgb;
+      r = Math.min(255, Math.max(0, Math.round(r + percent)));
+      g = Math.min(255, Math.max(0, Math.round(g + percent)));
+      b = Math.min(255, Math.max(0, Math.round(b + percent)));
+      return rgbToString([r,g,b]);
+    }
+
+    for(const n of nodes) {
+      if(seedColorMap[n.id]) continue;
+      const d = distances[n.id];
+      if(d === undefined) { n.color = '#dddddd'; continue; }
+      if(d === 0) continue;
+      const nearestSeed = owner[n.id] || null;
+      const baseColor = nearestSeed ? seedColorMap[nearestSeed] : '#04B819';
+      n.color = lightenColor(baseColor, d * 18);
+    }
+
+    for(const l of links) {
+      const sNode = nodes.find(n=>n.id===l.source), tNode = nodes.find(n=>n.id===l.target);
+      if(sNode && tNode) {
+        const r1 = parseColorToRGB(sNode.color)||[255,255,255];
+        const r2 = parseColorToRGB(tNode.color)||[255,255,255];
+        l.color = rgbToString([Math.round((r1[0]+r2[0])/2), Math.round((r1[1]+r2[1])/2), Math.round((r1[2]+r2[2])/2)]);
+      } else l.color = '#cccccc';
+    }
+
+    rawData = { nodes, links };
+    window.rawData = rawData;
+    Graph.graphData(rawData);
+    initLinkStatesFromRaw();
+    Graph.refresh();
+    document.getElementById('hud-status').innerText = `Fetched ${nodes.length} nodes, ${links.length} links.`;
+  } catch(e) {
+    console.error('regen error', e);
+    document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)';
+  }
+});
+
+/* ---- Hover display (title + summary) ---- */
+Graph.onNodeHover(node => {
+  if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary || ''}`;
+  else document.getElementById('portal-display').innerText = '';
+});
+
+/* ---- Final initialization ---- */
+initLinkStatesFromRaw();
+</script>
+</body>
+</html>
+```
