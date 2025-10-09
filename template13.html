@@ -123,10 +123,17 @@ let rawData = window.rawData; // mutable reference
 const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
   .graphData(rawData)
   .nodeRelSize(4)
-  .nodeLabel(n => {
-    if(n.mergedArticles) return `<b>${n.mergedArticles.join(' + ')}</b>\n${(n.mergedSummaries||[]).join('\n\n')}`;
-    return `<b>${n.name}</b>\n${n.summary || ''}`;
-  })
+.nodeLabel(n => {
+  if(n.mergedArticles) return `<b>${n.mergedArticles.join(' + ')}</b>\n${(n.mergedSummaries||[]).join('\n\n')}`;
+  const meshPart = (n.mesh_detail && n.mesh_detail.length)
+    ? `<hr><b>MeSH:</b> ` + n.mesh_detail.map(m => {
+        const q = (m.qualifiers || []).map(q => `${q.name}${q.major ? '★' : ''}`).join(', ');
+        return `${m.descriptor}${m.major ? '★' : ''}${q ? ' (' + q + ')' : ''}`;
+      }).join('; ')
+    : '';
+  return `<b>${n.name}</b><br>${n.summary || ''}${meshPart}`;
+})
+
   .nodeThreeObject(node => {
     // nodes as spheres
     if(node.mergedColors && Array.isArray(node.mergedColors) && node.mergedColors.length >= 2){
@@ -514,8 +521,10 @@ async function regenGraph(){
             color: color,
             seedGroup: seed,
             seedGroups: [seed],
-            mesh: meta.mesh || []
+            mesh: meta.mesh ? meta.mesh.map(m => m.descriptor) : [],
+            mesh_detail: meta.mesh || []
           };
+
           allNodes.set(pmid, node);
         }
       }
@@ -587,7 +596,17 @@ async function regenGraph(){
 const regenBtn = document.getElementById('regenBtn'); regenBtn.addEventListener('click', ()=>{ regenGraph(); });
 
 // hover behavior
-Graph.onNodeHover(node=>{ if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`; else document.getElementById('portal-display').innerText = ''; });
+Graph.onNodeHover(node => {
+  const el = document.getElementById('portal-display');
+  if(!node){ el.innerText = ''; return; }
+  const meshLines = (node.mesh_detail && node.mesh_detail.length)
+    ? '\n\nMeSH:\n' + node.mesh_detail.map(m => {
+        const q = (m.qualifiers || []).map(q => `${q.name}${q.major ? '★' : ''}`).join(', ');
+        return `• ${m.descriptor}${m.major ? '★' : ''}${q ? ' ('+q+')' : ''}`;
+      }).join('\n')
+    : '';
+  el.innerText = `${node.name}\n\n${node.summary||''}${meshLines}`;
+});
 
 // initialize
 initLinkStatesFromRaw();
