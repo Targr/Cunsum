@@ -464,48 +464,89 @@ async function regenGraph(){
   const connectorLimit = parseInt(document.getElementById('connectorInput').value) || 20;
   const limit = isNaN(limitVal) ? 20 : limitVal;
 
+  if(seeds.length === 0){ alert("Enter at least one search term or PMID."); return; }
+
   document.getElementById('hud-status').innerText = 'Fetching PubMed graph...';
   try{
-    let pmids = [];
-    // If all seeds are numeric, use directly; otherwise treat first as query
-    if(seeds.every(x => /^\d+$/.test(x))){
-      pmids = seeds;
-    }else if(seeds.length > 0){
-      pmids = await getPMIDsFromSearch(seeds[0], limit);
-    }
-    if(pmids.length === 0){ alert('No results.'); return; }
+    // Distinct color palette for up to ~8 seeds
+    const colors = [
+      "#00bcd4","#ff9800","#8bc34a","#e91e63","#9c27b0","#ff5722","#03a9f4","#cddc39"
+    ];
 
-    // Collect connected PMIDs
-    const all = new Set(pmids);
-    for(const s of pmids){
-      const refs = await getReferences(s, connectorLimit);
-      for(const r of refs) all.add(r);
-    }
+    const allNodes = new Map();
+    const allLinks = new Set();
 
-    // Build node/edge arrays
-    const nodes = [];
-    const nodeMap = {};
-    for(const pmid of Array.from(all).slice(0, limit*2)){
-      const meta = await getArticleSummary(pmid);
-      const node = { id: pmid, name: meta.title, color:'#ffffff', val:12, summary: meta.abstract, portals: meta.journal };
-      nodes.push(node);
-      nodeMap[pmid] = node;
-    }
+    // Iterate over each seed term separately
+    for(let sIndex=0; sIndex<seeds.length; sIndex++){
+      const seed = seeds[sIndex];
+      const color = colors[sIndex % colors.length];
+      let pmids = [];
 
-    const links = [];
-    for(const a of pmids){
-      const refs = await getReferences(a, connectorLimit);
-      for(const b of refs){
-        if(nodeMap[a] && nodeMap[b]) links.push({ source:a, target:b, color:'#cccccc' });
+      // Determine PMIDs for this seed
+      if(/^\d+(,\d+)*$/.test(seed)){
+        pmids = seed.split(',').map(x=>x.trim());
+      }else{
+        pmids = await getPMIDsFromSearch(seed, limit);
+      }
+      if(pmids.length === 0){ console.warn(`No results for ${seed}`); continue; }
+
+      // Collect neighborhood of this seed
+      const localPMIDs = new Set(pmids);
+      for(const p of pmids){
+        const refs = await getReferences(p, connectorLimit);
+        for(const r of refs) localPMIDs.add(r);
+      }
+
+      // Add nodes
+      for(const pmid of Array.from(localPMIDs)){
+        const meta = await getArticleSummary(pmid);
+        const prev = allNodes.get(pmid);
+        if(prev){
+          // Mark overlap (shared node)
+          prev.shared = true;
+          prev.color = "#ffffff"; // neutral for overlap
+        }else{
+          const node = {
+            id: pmid,
+            name: meta.title,
+            val: 12,
+            summary: meta.abstract,
+            portals: meta.journal,
+            color: color,
+            seedGroup: seed
+          };
+          allNodes.set(pmid, node);
+        }
+      }
+
+      // Add edges for this seed
+      for(const a of pmids){
+        const refs = await getReferences(a, connectorLimit);
+        for(const b of refs){
+          const key = `${a}->${b}`;
+          if(!allLinks.has(key)) allLinks.add(key);
+        }
       }
     }
+
+    // Assemble graph data
+    const nodes = Array.from(allNodes.values());
+    const links = Array.from(allLinks).map(edge=>{
+      const [src,tgt] = edge.split("->");
+      return { source:src, target:tgt, color:"#cccccc" };
+    });
 
     rawData = { nodes, links };
     window.rawData = rawData;
     Graph.graphData(rawData);
     initLinkStatesFromRaw();
     Graph.refresh();
-    document.getElementById('hud-status').innerText = `Fetched ${nodes.length} articles, ${links.length} links.`;
+
+    // HUD summary
+    const total = nodes.length;
+    const shared = nodes.filter(n=>n.shared).length;
+    document.getElementById('hud-status').innerText = 
+      `Fetched ${total} articles (${shared} shared between seeds).`;
   }catch(e){
     console.error('regen error', e);
     document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)';
