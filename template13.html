@@ -560,13 +560,16 @@ async function regenGraph(){
       let color = "#cccccc";
       let semantic = false;
       // semantic link if shared MeSH between these nodes
-      if(srcNode && tgtNode && srcNode.mesh && tgtNode.mesh){
-        const shared = srcNode.mesh.filter(x=>tgtNode.mesh.includes(x));
-        if(shared.length > 0){
-          color = "#66bb6a";
-          semantic = true;
-        }
-      }
+if(srcNode && tgtNode && srcNode.mesh_detail && tgtNode.mesh_detail){
+  const mesh1 = new Set(srcNode.mesh_detail.map(m => m.descriptor_id || m.descriptor));
+  const mesh2 = new Set(tgtNode.mesh_detail.map(m => m.descriptor_id || m.descriptor));
+  const shared = [...mesh1].filter(x => mesh2.has(x));
+  if(shared.length > 0){
+    color = "#66bb6a";
+    semantic = true;
+  }
+}
+
       return { source:src, target:tgt, color, semantic };
     });
 
