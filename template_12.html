@@ -104,16 +104,11 @@ let rawData = window.rawData; // mutable reference
 
 <script>
 /* ================ Patched client code ================
-   Fixes applied in this patch:
-   1) Regen: robust dependable regeneration (avoids duplicate variable declarations,
-      updates window.rawData and Graph properly, proper UI status updates)
-   2) Verlet: checkbox now toggles a simple tube rendering mode (no strumming) and
-      rebuilds tube visuals immediately
-   3) Adjacent reading: speakNode now finds a neighbor on the same edge, speaks
-      a connection description (directionality / mutual / shared neighbors), highlights
-      the connecting tube while speaking, then recurses
-   4) Misc: use string keys for linkStates map (reliable lookups), extra error handling
-   5) Improved parallel-link curvature + hover animation (added)
+   Keep everything the same but make hover only change color (no tube scaling/movement).
+   Minimal edits:
+   - highlightLinkBetween now marks hovered state and sets/reverts colors
+   - engine tick respects hovered state (won't overwrite hovered colors)
+   - Graph.onLinkHover and Graph.onNodeHover call highlightLinkBetween instead of anim targets
 */
 
 const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
@@ -163,9 +158,8 @@ function makeLinkState(){ return {
   meshA:null, meshB:null,
   outlineA:null, outlineB:null,
   colorA:'#ffffff', colorB:'#ffffff', _orig:{},
-  // animation state:
-  currentScale: 1.0, targetScale: 1.0,
-  currentEmissive: 0.45, targetEmissive: 0.45
+  // hover flag
+  _hover: false
 }; }
 
 function disposeMesh(m){ try{ if(!m) return; if(m.geometry) m.geometry.dispose(); if(m.material){ if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose()); else m.material.dispose(); } }catch(e){console.warn('dispose',e);} }
@@ -221,26 +215,23 @@ function rebuildTubeGeometry(state, key, groupsMap){
     const matA = new THREE.MeshStandardMaterial({
       color: state.colorA || '#ffffff',
       emissive: new THREE.Color(state.colorA || '#ffffff'),
-      emissiveIntensity: state.currentEmissive || 0.45,
+      emissiveIntensity: 0.45,
       roughness: 0.6,
       metalness: 0.05
     });
     state.meshA = new THREE.Mesh(geoA, matA);
-    state.meshA.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
     stringGroup.add(state.meshA);
 
     const geoAoutline = new THREE.TubeGeometry(curveA, Math.max(4, SPRING_SEGMENTS), radiusMain + 0.06, 8, false);
     const matAout = new THREE.MeshStandardMaterial({
       color: state.colorA || '#ffffaa',
       emissive: new THREE.Color(state.colorA || '#ffffaa'),
-      emissiveIntensity: (state.currentEmissive||0.45) * 1.6,
+      emissiveIntensity: 0.9,
       transparent: true,
       opacity: 0.12,
       side: THREE.DoubleSide
     });
     const outlineA = new THREE.Mesh(geoAoutline, matAout);
-    outlineA.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
-    state.outlineA = outlineA;
     stringGroup.add(outlineA);
   }
 
@@ -251,26 +242,23 @@ function rebuildTubeGeometry(state, key, groupsMap){
     const matB = new THREE.MeshStandardMaterial({
       color: state.colorB || '#ffffff',
       emissive: new THREE.Color(state.colorB || '#ffffff'),
-      emissiveIntensity: state.currentEmissive || 0.45,
+      emissiveIntensity: 0.45,
       roughness: 0.6,
       metalness: 0.05
     });
     state.meshB = new THREE.Mesh(geoB, matB);
-    state.meshB.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
     stringGroup.add(state.meshB);
 
     const geoBoutline = new THREE.TubeGeometry(curveB, Math.max(4, SPRING_SEGMENTS), radiusMain + 0.06, 8, false);
     const matBout = new THREE.MeshStandardMaterial({
       color: state.colorB || '#ffffaa',
       emissive: new THREE.Color(state.colorB || '#ffffaa'),
-      emissiveIntensity: (state.currentEmissive||0.45) * 1.6,
+      emissiveIntensity: 0.9,
       transparent: true,
       opacity: 0.12,
       side: THREE.DoubleSide
     });
     const outlineB = new THREE.Mesh(geoBoutline, matBout);
-    outlineB.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
-    state.outlineB = outlineB;
     stringGroup.add(outlineB);
   }
 }
@@ -316,44 +304,15 @@ Graph.onEngineTick(()=>{
       st.points[i].add(displacement);
     }
 
-    // smoothly animate currentScale/currentEmissive -> target
-    const lerp = (a,b,f) => a + (b-a) * f;
-    st.currentScale = st.currentScale === undefined ? st.targetScale : lerp(st.currentScale, st.targetScale, 0.2);
-    st.currentEmissive = st.currentEmissive === undefined ? st.targetEmissive : lerp(st.currentEmissive, st.targetEmissive, 0.18);
-
-    // set colors according to verletEnabled
-    if(verletEnabled){ st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); }
-    else { st.colorA = st.colorB = '#ffffff'; st.currentEmissive = st.currentEmissive || 0.45; st.targetEmissive = st.targetEmissive || 0.45; }
+    // set colors according to verletEnabled — but do not override if hover is active
+    if(verletEnabled){
+      if(!st._hover){ st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); }
+    } else {
+      if(!st._hover){ st.colorA = st.colorB = '#ffffff'; }
+    }
 
     // rebuild geometry for this state using groupsMap (so offsets are consistent across parallels)
     rebuildTubeGeometry(st, k, groupsMap);
-
-    // apply animated material properties/scale to freshly-created meshes (rebuildTubeGeometry creates them new each tick)
-    if(st.meshA){
-      try{
-        if(st.meshA.material && st.meshA.material.emissive) st.meshA.material.emissiveIntensity = st.currentEmissive;
-        st.meshA.scale.set(st.currentScale, st.currentScale, st.currentScale);
-      }catch(e){}
-    }
-    if(st.outlineA){
-      try{
-        if(st.outlineA.material && st.outlineA.material.emissive) st.outlineA.material.emissiveIntensity = st.currentEmissive * 1.6;
-        st.outlineA.scale.set(st.currentScale, st.currentScale, st.currentScale);
-      }catch(e){}
-    }
-    if(st.meshB){
-      try{
-        if(st.meshB.material && st.meshB.material.emissive) st.meshB.material.emissiveIntensity = st.currentEmissive;
-        st.meshB.scale.set(st.currentScale, st.currentScale, st.currentScale);
-      }catch(e){}
-    }
-    if(st.outlineB){
-      try{
-        if(st.outlineB.material && st.outlineB.material.emissive) st.outlineB.material.emissiveIntensity = st.currentEmissive * 1.6;
-        st.outlineB.scale.set(st.currentScale, st.currentScale, st.currentScale);
-      }catch(e){}
-    }
-
   });
 });
 
@@ -400,72 +359,32 @@ function setGlow(nodeId, on){
   });
 }
 
-/* ------------------ Link highlight (temporary) ------------------ */
+/* ------------------ Link highlight (temporary color-change only) ------------------ */
+// Modified: mark hovered state and set/revert colors; do not change scale/emissive animation.
+// This function will be used by hover handlers.
 function highlightLinkBetween(aId,bId,on){
   const k1 = keyFor(aId,bId), k2 = keyFor(bId,aId);
   [k1,k2].forEach(k=>{
     const st = linkStates.get(k);
     if(!st) return;
     if(on){
+      // store original if not already stored
       if(st._origColorA === undefined) st._origColorA = st.colorA;
       if(st._origColorB === undefined) st._origColorB = st.colorB;
-      st.colorA = st.colorB = '#ffff66';
-    }
-    else {
+      // set hover color
+      st.colorA = st.colorB = '#ffff66'; // hover highlight color (tweakable)
+      st._hover = true;
+    } else {
+      // revert to stored colors (if present)
       if(st._origColorA !== undefined) st.colorA = st._origColorA;
       if(st._origColorB !== undefined) st.colorB = st._origColorB;
       delete st._origColorA; delete st._origColorB;
+      st._hover = false;
     }
-    // also adjust animation targets
-    if(on){ st.targetScale = 1.8; st.targetEmissive = 1.6; }
-    else { st.targetScale = 1.0; st.targetEmissive = 0.45; }
+    // rebuild the visual for this state immediately
+    try{ const groups = buildParallelGroups(); rebuildTubeGeometry(st, k, groups); }catch(e){ console.warn('rebuild after highlight failed', e); }
   });
 }
-
-/* ------------------ Link hover animation wiring ------------------ */
-// When a link is hovered, set its state's animation targets to a larger scale & brighter emissive.
-// When hover leaves, revert. Also, hovering a node highlights its connected links.
-
-Graph.onLinkHover(link => {
-  // reset all targets to defaults first
-  linkStates.forEach(st=>{ st.targetScale = 1.0; st.targetEmissive = 0.45; });
-
-  if(!link) return;
-
-  const sId = (typeof link.source === 'object') ? link.source.id : link.source;
-  const tId = (typeof link.target === 'object') ? link.target.id : link.target;
-  // try both directions, pick whichever exists
-  const keysToTry = [ keyFor(sId,tId), keyFor(tId,sId) ];
-  for(const k of keysToTry){
-    const st = linkStates.get(k);
-    if(st){
-      st.targetScale = 1.85;
-      st.targetEmissive = 1.6;
-    }
-  }
-});
-
-// Highlight connected links when node hovered
-Graph.onNodeHover(node => {
-  // default: clear portal display if not hovered
-  if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`;
-  else document.getElementById('portal-display').innerText = '';
-
-  // revert all to defaults first
-  linkStates.forEach(st=>{ st.targetScale = 1.0; st.targetEmissive = 0.45; });
-
-  if(!node) return;
-  // find connected links
-  (rawData.links||[]).forEach(l=>{
-    const s = (typeof l.source==='object') ? l.source.id : l.source;
-    const t = (typeof l.target==='object') ? l.target.id : l.target;
-    if(s === node.id || t === node.id){
-      const k1 = keyFor(s,t), k2 = keyFor(t,s);
-      const st = linkStates.get(k1) || linkStates.get(k2);
-      if(st){ st.targetScale = 1.5; st.targetEmissive = 0.95; }
-    }
-  });
-});
 
 /* ------------------ Speech helpers ------------------ */
 function speakText(text, opts={rate:1.0,pitch:1.0}){
@@ -520,7 +439,7 @@ async function speakNode(node, visited=new Set()){
   if(neighbors.length===0) return;
   const next = neighbors[Math.floor(Math.random()*neighbors.length)];
   const desc = connectionDescription(node.id, next.id);
-  // highlight link while speaking
+  // highlight link while speaking (uses color-change)
   highlightLinkBetween(node.id, next.id, true);
   await speakText(desc);
   highlightLinkBetween(node.id, next.id, false);
@@ -678,6 +597,9 @@ const regenBtn = document.getElementById('regenBtn'); regenBtn.addEventListener(
 // hover behavior
 Graph.onNodeHover(node=>{ if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`; else document.getElementById('portal-display').innerText = ''; });
 
+// initialize
+initLinkStatesFromRaw();
+
 /* ------------------ Initialization of link states ------------------ */
 function getNodeById(id){ return (rawData.nodes||[]).find(n=>n.id===id); }
 function getNodeColor(id){ const n=getNodeById(id); return n ? (n.color||'#ffffff') : '#ffffff'; }
@@ -693,9 +615,8 @@ function initLinkStatesFromRaw(){
     const st = makeLinkState();
     st.colorA = verletEnabled ? (getNodeColor(src) || '#ffffff') : '#ffffff';
     st.colorB = verletEnabled ? (getNodeColor(tgt) || '#ffffff') : '#ffffff';
-    // reset animation targets for new states
-    st.currentScale = 1.0; st.targetScale = 1.0;
-    st.currentEmissive = 0.45; st.targetEmissive = 0.45;
+    // reset hover flag for new states
+    st._hover = false;
     linkStates.set(k, st);
   });
 }
@@ -705,16 +626,50 @@ const verletToggle = document.getElementById('verletToggle');
 verletToggle.checked = verletEnabled;
 verletToggle.addEventListener('change', (e)=>{
   verletEnabled = !!e.target.checked;
-  // update existing states immediately
-  linkStates.forEach((st,k)=>{ const [src,tgt] = k.split('::'); st.colorA = verletEnabled ? getNodeColor(src) : '#ffffff'; st.colorB = verletEnabled ? getNodeColor(tgt) : '#ffffff'; });
+  // update existing states immediately (but don't overwrite hovered links)
+  linkStates.forEach((st,k)=>{ const [src,tgt] = k.split('::'); if(!st._hover) { st.colorA = verletEnabled ? getNodeColor(src) : '#ffffff'; st.colorB = verletEnabled ? getNodeColor(tgt) : '#ffffff'; } });
 });
 
-/* ------------------ Link hover / highlight done earlier uses highlightLinkBetween ------------------ */
+/* ------------------ Link hover animation wiring (COLOR-ONLY) ------------------ */
+// When a link is hovered, set its state's color to highlight; when hover leaves revert.
+// Hovering a node highlights its connected links.
+
+Graph.onLinkHover(link => {
+  // first clear any previous hovered flags/colors across all links
+  linkStates.forEach((st,k)=>{ if(st._hover) highlightLinkBetween(k.split('::')[0], k.split('::')[1], false); });
+
+  if(!link) return;
+
+  const sId = (typeof link.source === 'object') ? link.source.id : link.source;
+  const tId = (typeof link.target === 'object') ? link.target.id : link.target;
+  // try both directions, pick whichever exists
+  const keysToTry = [ keyFor(sId,tId), keyFor(tId,sId) ];
+  for(const k of keysToTry){
+    const st = linkStates.get(k);
+    if(st){
+      highlightLinkBetween(sId, tId, true);
+      break;
+    }
+  }
+});
+
+// Highlight connected links when node hovered (color-only)
+Graph.onNodeHover(node => {
+  // revert any previously hovered links first
+  linkStates.forEach((st,k)=>{ if(st._hover) highlightLinkBetween(k.split('::')[0], k.split('::')[1], false); });
+
+  if(!node) return;
+  // find connected links and highlight them
+  (rawData.links||[]).forEach(l=>{
+    const s = (typeof l.source==='object') ? l.source.id : l.source;
+    const t = (typeof l.target==='object') ? l.target.id : l.target;
+    if(s === node.id || t === node.id){
+      highlightLinkBetween(s, t, true);
+    }
+  });
+});
 
 /* ------------------ Speech helpers, selection, regen, etc. are already defined above ------------------ */
-
-// initialize
-initLinkStatesFromRaw();
 
 </script>
 
