@@ -393,93 +393,123 @@ function playMidi(midi,d=300,vol=0.3){ if(midi==null) return; const o=audioCtx.c
 async function playWord(w,d=180){ for(const ch of w){ playMidi(letterToNote(ch), d, 0.35); await new Promise(r=>setTimeout(r,d)); } }
 async function playNodeSequence(node, visited=new Set()){ if(!node || visited.has(node.id)) return; visited.add(node.id); document.getElementById('portal-display').innerText = node.mergedSummaries ? node.mergedSummaries.join('\n\n') : (node.summary || ''); const orig = node.color; node.color = '#FF00FF'; Graph.refresh(); (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#FF00FF'; l.opacity=1; }}); Graph.refresh(); await playWord(node.name || ''); node.color = orig; (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#cccccc'; l.opacity=0.6; }}); Graph.refresh(); const connected = (rawData.links||[]).filter(l=>l.source===node.id).map(l=> getNodeById(l.target)); for(const n of connected) await playNodeSequence(n, visited); }
 
-/* ------------------ Regen implementation (robust) ------------------ */
-function isTalkPage(title){ if(!title) return false; return /^talk:/i.test(title); }
-async function fetchBacklinks(title, max){
-  const out=[]; let blcontinue=null; try{
-    while(out.length < max){
-      const params = new URLSearchParams({ action:'query', list:'backlinks', bltitle:title, bllimit:'max', format:'json' });
-      if(blcontinue) params.set('blcontinue', blcontinue);
-      const url = 'https://en.wikipedia.org/w/api.php?origin=*' + '&' + params.toString();
-      const res = await fetch(url);
-      if(!res.ok) break;
-      const j = await res.json();
-      const bls = j.query?.backlinks?.map(x=>x.title) || [];
-      out.push(...bls);
-      if(!j.continue?.blcontinue) break; blcontinue = j.continue.blcontinue;
-    }
-  }catch(e){ console.warn('fetchBacklinks error', e); }
-  return out.slice(0, max);
+/* ------------------ Regen implementation (PubMed / NCBI) ------------------ */
+
+async function entrezFetch(endpoint, params){
+  const url = new URL(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/${endpoint}.fcgi`);
+  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
+  const r = await fetch(url.toString());
+  if(!r.ok) throw new Error(`Entrez error: ${r.status}`);
+  return await r.text();
 }
-async function fetchSummary(title){ try{ const res = await fetch('https://en.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(title)); if(!res.ok) return 'No summary available'; const j = await res.json(); return j.extract || 'No summary available'; }catch(e){ console.warn('summary fail', e); return 'No summary available'; } }
+
+async function getPMIDsFromSearch(term, limit=20){
+  if(!term) return [];
+  const xml = await entrezFetch('esearch', { db:'pubmed', term, retmax:limit, retmode:'json' });
+  try{
+    const j = JSON.parse(xml);
+    return j.esearchresult?.idlist || [];
+  }catch(e){ console.warn('search parse fail', e); return []; }
+}
+
+async function getArticleSummary(pmid){
+  // combine ESummary + EFetch for robustness
+  let title='', abstract='', journal='', pubdate='';
+  try{
+    const j = await (await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${pmid}&retmode=json`)).json();
+    const res = j.result?.[pmid] || {};
+    title = res.title || '';
+    journal = res.fulljournalname || '';
+    pubdate = res.pubdate || '';
+  }catch(e){}
+
+  try{
+    const xml = await (await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${pmid}&retmode=xml`)).text();
+    const dom = new DOMParser().parseFromString(xml, 'text/xml');
+    if(!title){
+      const el = dom.querySelector('ArticleTitle, Title');
+      if(el) title = el.textContent.trim();
+    }
+    const absNodes = dom.querySelectorAll('AbstractText, Abstract');
+    if(absNodes.length){
+      abstract = Array.from(absNodes).map(x => x.textContent.trim()).filter(Boolean).join('\n\n');
+    }
+  }catch(e){}
+  if(!title) title = `(Untitled article, PMID ${pmid})`;
+  if(title.length > 120) title = title.slice(0,117)+'...';
+  if(!abstract) abstract = '(No abstract available.)';
+  return { pmid, title, abstract, journal, pubdate };
+}
+
+async function getReferences(pmid, limit=50){
+  try{
+    const j = await (await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pubmed&id=${pmid}&linkname=pubmed_pubmed_refs&retmode=json`)).json();
+    const out = [];
+    for(const ls of j.linksets || []){
+      for(const ln of ls.linksetdb || []){
+        for(const l of ln.links || []){
+          if(out.length >= limit) break;
+          out.push(l);
+        }
+      }
+    }
+    return Array.from(new Set(out.map(String)));
+  }catch(e){ console.warn('refs fail', e); return []; }
+}
 
 async function regenGraph(){
   const seedText = document.getElementById('seedInput').value.trim();
   const seeds = seedText ? seedText.split(',').map(s=>s.trim()).filter(Boolean) : [];
   const limitVal = parseInt(document.getElementById('limitInput').value);
   const connectorLimit = parseInt(document.getElementById('connectorInput').value) || 20;
-  const limit = isNaN(limitVal) ? null : limitVal;
+  const limit = isNaN(limitVal) ? 20 : limitVal;
 
-  document.getElementById('hud-status').innerText = 'Fetching graph...';
+  document.getElementById('hud-status').innerText = 'Fetching PubMed graph...';
   try{
-    const visited = new Set(); const resultArticles = [];
-    for(const s of seeds) if(!isTalkPage(s) && !visited.has(s)){ resultArticles.push(s); visited.add(s); }
+    let pmids = [];
+    // If all seeds are numeric, use directly; otherwise treat first as query
+    if(seeds.every(x => /^\d+$/.test(x))){
+      pmids = seeds;
+    }else if(seeds.length > 0){
+      pmids = await getPMIDsFromSearch(seeds[0], limit);
+    }
+    if(pmids.length === 0){ alert('No results.'); return; }
 
-    // collect direct neighbors
-    const directNeighbors = [];
-    if(limit !== null){
-      const queues = [];
-      for(const s of seeds){ if(isTalkPage(s)) { queues.push({seed:s, backlinks:[]}); continue; } const bls = await fetchBacklinks(s, limit||200); queues.push({seed:s, backlinks: bls.filter(b=>!isTalkPage(b))}); }
-      let i=0;
-      while(directNeighbors.length < (limit||0) && queues.some(q=>q.backlinks.length>0)){
-        const q = queues[i % queues.length]; if(q.backlinks.length>0){ const b=q.backlinks.shift(); if(!visited.has(b) && !directNeighbors.includes(b)) directNeighbors.push(b); } i++; }
-    } else {
-      for(const s of seeds){ if(isTalkPage(s)) continue; const bls = await fetchBacklinks(s, 200); for(const b of bls){ if(isTalkPage(b)) continue; if(!visited.has(b) && !directNeighbors.includes(b)) directNeighbors.push(b); } }
+    // Collect connected PMIDs
+    const all = new Set(pmids);
+    for(const s of pmids){
+      const refs = await getReferences(s, connectorLimit);
+      for(const r of refs) all.add(r);
     }
 
-    for(const dn of directNeighbors) if(!visited.has(dn)){ resultArticles.push(dn); visited.add(dn); }
-    for(const dn of directNeighbors){ const bls = await fetchBacklinks(dn, connectorLimit); for(const b of bls){ if(isTalkPage(b)) continue; if(!visited.has(b)){ resultArticles.push(b); visited.add(b); } } }
-
-    const articleSet = new Set(resultArticles.filter(a=>!isTalkPage(a)));
-    const links = [];
-    for(const a of resultArticles){ if(isTalkPage(a)) continue; const bls = await fetchBacklinks(a, 200); for(const b of bls){ if(isTalkPage(b)) continue; if(articleSet.has(b)) links.push({ source: b, target: a, color:'#cccccc' }); } }
-
+    // Build node/edge arrays
     const nodes = [];
-    for(const a of Array.from(articleSet)){
-      const summary = await fetchSummary(a);
-      nodes.push({ id: a, name: a, color:'#ffffff', val:12, summary });
+    const nodeMap = {};
+    for(const pmid of Array.from(all).slice(0, limit*2)){
+      const meta = await getArticleSummary(pmid);
+      const node = { id: pmid, name: meta.title, color:'#ffffff', val:12, summary: meta.abstract, portals: meta.journal };
+      nodes.push(node);
+      nodeMap[pmid] = node;
     }
 
-    // assign seed colors
-    const seedColors = ["#ff0000","#00ff00","#0000ff","#ff00ff","#00ffff","#ffff00","#ff8800","#8800ff","#0088ff","#88ff00","#ff0088","#00ff88"];
-    const seedColorMap = {};
-    seeds.forEach((s,i)=>{ if(!isTalkPage(s)) seedColorMap[s] = seedColors[i % seedColors.length]; });
-    for(const s of seeds){ if(isTalkPage(s)) continue; const n = nodes.find(x=>x.id===s); if(n){ n.color = seedColorMap[s]||'#04B819'; n.val = 36; } }
-
-    // adjacency map
-    const neighborMap = {};
-    links.forEach(l=>{ if(!neighborMap[l.source]) neighborMap[l.source]=[]; neighborMap[l.source].push(l.target); if(!neighborMap[l.target]) neighborMap[l.target]=[]; neighborMap[l.target].push(l.source); });
-
-    // BFS multi-source to color by proximity
-    const distances = {}, owner = {}; const q = [];
-    for(const s of seeds) if(!isTalkPage(s) && articleSet.has(s)){ distances[s]=0; owner[s]=s; q.push(s); }
-    while(q.length>0){ const cur=q.shift(); const d = distances[cur]; const ngh = neighborMap[cur] || []; for(const nb of ngh){ if(distances[nb] === undefined){ distances[nb] = d+1; owner[nb] = owner[cur]; q.push(nb); } } }
-
-    function parseColorToRGB(c){ if(!c) return null; c=c.trim(); if(c.startsWith('#')){ const hex=c.slice(1); if(hex.length===3) return hex.split('').map(h=>parseInt(h+h,16)); return [parseInt(hex.slice(0,2),16), parseInt(hex.slice(2,4),16), parseInt(hex.slice(4,6),16)]; } else if(c.startsWith('rgb')){ const m=c.match(/\d+/g); if(m && m.length>=3) return m.slice(0,3).map(x=>parseInt(x,10)); } return null; }
-    function rgbToString(rgb){ return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`; }
-    function lightenColor(hexOrRgb, percent){ const rgb = parseColorToRGB(hexOrRgb); if(!rgb) return hexOrRgb; let [r,g,b]=rgb; r=Math.min(255,Math.max(0,Math.round(r+percent))); g=Math.min(255,Math.max(0,Math.round(g+percent))); b=Math.min(255,Math.max(0,Math.round(b+percent))); return rgbToString([r,g,b]); }
-
-    for(const n of nodes){ if(seedColorMap[n.id]) continue; const d = distances[n.id]; if(d===undefined){ n.color='#dddddd'; continue; } if(d===0) continue; const nearest = owner[n.id]||null; const base = nearest ? seedColorMap[nearest] : '#04B819'; n.color = lightenColor(base, d * 18); }
-
-    for(const l of links){ const sNode = nodes.find(n=>n.id===l.source); const tNode = nodes.find(n=>n.id===l.target); if(sNode && tNode){ const r1=parseColorToRGB(sNode.color)||[255,255,255]; const r2=parseColorToRGB(tNode.color)||[255,255,255]; l.color = rgbToString([Math.round((r1[0]+r2[0])/2), Math.round((r1[1]+r2[1])/2), Math.round((r1[2]+r2[2])/2)]); } else l.color='#cccccc'; }
+    const links = [];
+    for(const a of pmids){
+      const refs = await getReferences(a, connectorLimit);
+      for(const b of refs){
+        if(nodeMap[a] && nodeMap[b]) links.push({ source:a, target:b, color:'#cccccc' });
+      }
+    }
 
     rawData = { nodes, links };
     window.rawData = rawData;
     Graph.graphData(rawData);
     initLinkStatesFromRaw();
     Graph.refresh();
-    document.getElementById('hud-status').innerText = `Fetched ${nodes.length} nodes, ${links.length} links.`;
-  }catch(e){ console.error('regen error', e); document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)'; }
+    document.getElementById('hud-status').innerText = `Fetched ${nodes.length} articles, ${links.length} links.`;
+  }catch(e){
+    console.error('regen error', e);
+    document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)';
+  }
 }
 
 // wire regen button
