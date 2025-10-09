@@ -2,9 +2,10 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>template_fixed3 — patched (Verlet, Regen, Adjacent TTS)</title>
+<title>template_fixed3 — patched (Verlet, Regen, Adjacent TTS) — collapsible HUD</title>
 <style>
   body { margin:0; overflow:hidden; background:#000; }
+  /* HUD base (keeps original look) */
   #hud { position:absolute; top:8px; right:8px; color:white; font-family:sans-serif; font-size:13px;
           background:rgba(0,0,0,0.8); padding:12px; border-radius:10px; z-index:30; width:420px; }
   #portal-display { position:absolute; top:8px; left:8px; color:white; font-family:sans-serif; font-size:14px; z-index:30; max-width:600px; white-space:pre-wrap; }
@@ -12,52 +13,73 @@
   .small { font-size:12px; color:#ddd; }
   #hud .row { margin-top:8px; }
   #hud .muted { color:#999; font-size:12px; }
+
+  /* Collapsible HUD styles */
+  #hud { transition: width 210ms ease, height 210ms ease, right 150ms ease; overflow: visible; }
+  #hud .hud-header { cursor: default; }
+  #hud .hud-content { transition: max-height 260ms ease, opacity 180ms ease; max-height: 1200px; opacity: 1; overflow: hidden; }
+  #hud.collapsed { width:48px !important; height:48px !important; padding:6px !important; overflow: visible; }
+  #hud.collapsed .hud-content { max-height: 0; opacity: 0; pointer-events: none; }
+  #hud.collapsed .small, #hud.collapsed .muted, #hud.collapsed .row, #hud.collapsed input, #hud.collapsed button { display: none; }
+  #hud #hud-toggle { transition: transform 180ms ease; background:transparent;border:none;color:#fff;font-size:14px; }
+  #hud.collapsed #hud-toggle { transform: rotate(180deg); }
+
 </style>
 </head>
 <body>
 <div id="3d-graph" style="width:100%;height:100%;"></div>
 <div id="portal-display"></div>
 
-<div id="hud">
-  <div><b>Wikipedia Graph (patched)</b></div>
-
-  <div class="row">
-    <label class="small">Seed articles (comma-separated):<br>
-      <input id="seedInput" type="text" style="width:380px;" placeholder="Dog,Cat">
-    </label>
+<!-- Collapsible HUD -->
+<div id="hud" class="expanded" role="region" aria-label="HUD">
+  <div class="hud-header" style="display:flex;align-items:center;justify-content:space-between;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button id="hud-toggle" aria-expanded="true" title="Collapse/Expand HUD" style="width:28px;height:28px;border-radius:6px;border:none;background:transparent;color:#fff;cursor:pointer;font-weight:bold;">
+        ◀
+      </button>
+      <div><b>Wikipedia Graph (patched)</b></div>
+    </div>
   </div>
 
-  <div class="row">
-    <label class="small">Direct-neighbor limit:<br>
-      <input id="limitInput" type="number" style="width:100px;" placeholder="20">
-    </label>
-    <label class="small" style="margin-left:10px;">Connector limit:<br>
-      <input id="connectorInput" type="number" value="20" style="width:90px;">
-    </label>
-  </div>
+  <div class="hud-content">
+    <div class="row">
+      <label class="small">Seed articles (comma-separated):<br>
+        <input id="seedInput" type="text" style="width:380px;" placeholder="Dog,Cat">
+      </label>
+    </div>
 
-  <div class="row">
-    <label><input id="verletToggle" type="checkbox"> Enable Verlet (simple tubes)</label>
-    <div class="muted">(simple tube halves colored by node when enabled; no strumming)</div>
-  </div>
+    <div class="row">
+      <label class="small">Direct-neighbor limit:<br>
+        <input id="limitInput" type="number" style="width:100px;" placeholder="20">
+      </label>
+      <label class="small" style="margin-left:10px;">Connector limit:<br>
+        <input id="connectorInput" type="number" value="20" style="width:90px;">
+      </label>
+    </div>
 
-  <div class="row">
-    <button id="regenBtn" class="btn">Regenerate</button>
-    <button id="resetSelect" class="btn">Clear Selection</button>
-    <button id="hud-merge-nodes-btn" class="btn">Merge Nodes</button>
-    <button id="hud-read-summary-btn" class="btn">Read Summary (TTS)</button>
-    <label style="margin-left:8px;">
-      <input id="readAdjacent" type="checkbox"> <span class="small">Auto-read adjacent</span>
-    </label>
-  </div>
+    <div class="row">
+      <label><input id="verletToggle" type="checkbox"> Enable Verlet (simple tubes)</label>
+      <div class="muted">(simple tube halves colored by node when enabled; no strumming)</div>
+    </div>
 
-  <div class="row">
-    <label class="small">Color picker for selected:</label><br>
-    <input id="colorInput" type="color" value="#ff0000" style="width:90px;">
-    <button id="applyColor" class="btn">Apply Color</button>
-  </div>
+    <div class="row">
+      <button id="regenBtn" class="btn">Regenerate</button>
+      <button id="resetSelect" class="btn">Clear Selection</button>
+      <button id="hud-merge-nodes-btn" class="btn">Merge Nodes</button>
+      <button id="hud-read-summary-btn" class="btn">Read Summary (TTS)</button>
+      <label style="margin-left:8px;">
+        <input id="readAdjacent" type="checkbox"> <span class="small">Auto-read adjacent</span>
+      </label>
+    </div>
 
-  <div id="hud-status" class="row" style="margin-top:10px;color:#04B819;"></div>
+    <div class="row">
+      <label class="small">Color picker for selected:</label><br>
+      <input id="colorInput" type="color" value="#ff0000" style="width:90px;">
+      <button id="applyColor" class="btn">Apply Color</button>
+    </div>
+
+    <div id="hud-status" class="row" style="margin-top:10px;color:#04B819;"></div>
+  </div>
 </div>
 
 <!-- libs -->
@@ -91,6 +113,7 @@ let rawData = window.rawData; // mutable reference
       a connection description (directionality / mutual / shared neighbors), highlights
       the connecting tube while speaking, then recurses
    4) Misc: use string keys for linkStates map (reliable lookups), extra error handling
+   5) Improved parallel-link curvature + hover animation (added)
 */
 
 const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
@@ -135,62 +158,203 @@ function otherKey(src,tgt){ return `${tgt}::${src}`; }
 
 function makeInitialPoints(){ const pts=[]; for(let i=0;i<SPRING_SEGMENTS;i++) pts.push(new THREE.Vector3()); return pts; }
 
-function makeLinkState(){ return { points: makeInitialPoints(), meshA:null, meshB:null, colorA:'#ffffff', colorB:'#ffffff', _orig:{} }; }
+function makeLinkState(){ return {
+  points: makeInitialPoints(),
+  meshA:null, meshB:null,
+  outlineA:null, outlineB:null,
+  colorA:'#ffffff', colorB:'#ffffff', _orig:{},
+  // animation state:
+  currentScale: 1.0, targetScale: 1.0,
+  currentEmissive: 0.45, targetEmissive: 0.45
+}; }
 
 function disposeMesh(m){ try{ if(!m) return; if(m.geometry) m.geometry.dispose(); if(m.material){ if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose()); else m.material.dispose(); } }catch(e){console.warn('dispose',e);} }
 
-function rebuildTubeGeometry(state){
+function unorderedKey(a,b){
+  return a < b ? `${a}::${b}` : `${b}::${a}`;
+}
+
+// build a map of groups for parallels so we can offset them consistently
+function buildParallelGroups(){
+  const groups = new Map();
+  for(const [k, st] of linkStates.entries()){
+    const [s,t] = k.split('::');
+    const uk = unorderedKey(s,t);
+    if(!groups.has(uk)) groups.set(uk, []);
+    groups.get(uk).push(k);
+  }
+  return groups;
+}
+
+function rebuildTubeGeometry(state, key, groupsMap){
+  // dispose old
   if(state.meshA){ stringGroup.remove(state.meshA); disposeMesh(state.meshA); state.meshA=null; }
   if(state.meshB){ stringGroup.remove(state.meshB); disposeMesh(state.meshB); state.meshB=null; }
+  if(state.outlineA){ stringGroup.remove(state.outlineA); disposeMesh(state.outlineA); state.outlineA=null; }
+  if(state.outlineB){ stringGroup.remove(state.outlineB); disposeMesh(state.outlineB); state.outlineB=null; }
+
+  const [srcId, tgtId] = key.split('::');
+  const uk = unorderedKey(srcId, tgtId);
+  const group = groupsMap.get(uk) || [key];
+  const idx = group.indexOf(key);
+  const count = group.length;
+
+  const baseOffset = 0.36; // spacing scalar
+  const offsetScale = (count <= 1) ? 0 : ((idx - (count-1)/2) * baseOffset);
+
+  function makePerp(sv, tv){
+    const dir = new THREE.Vector3().subVectors(tv, sv).normalize();
+    let perp = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0,1,0));
+    if(perp.lengthSq() < 1e-6) perp = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(1,0,0));
+    perp.normalize();
+    return perp;
+  }
+
   const half = Math.floor(SPRING_SEGMENTS/2);
-  const ptsA = state.points.slice(0, half+1);
-  const ptsB = state.points.slice(half, state.points.length);
-  if(ptsA.length>=2){ const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5); const geoA = new THREE.TubeGeometry(curveA, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matA = new THREE.MeshStandardMaterial({ color: state.colorA || '#ffffff' }); state.meshA = new THREE.Mesh(geoA, matA); stringGroup.add(state.meshA); }
-  if(ptsB.length>=2){ const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5); const geoB = new THREE.TubeGeometry(curveB, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matB = new THREE.MeshStandardMaterial({ color: state.colorB || '#ffffff' }); state.meshB = new THREE.Mesh(geoB, matB); stringGroup.add(state.meshB); }
+  const ptsA = state.points.slice(0, half+1).map(p => p.clone());
+  const ptsB = state.points.slice(half, state.points.length).map(p => p.clone());
+
+  if(ptsA.length >= 2){
+    const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.6);
+    const radiusMain = 0.14;
+    const geoA = new THREE.TubeGeometry(curveA, Math.max(4, SPRING_SEGMENTS), radiusMain, 10, false);
+    const matA = new THREE.MeshStandardMaterial({
+      color: state.colorA || '#ffffff',
+      emissive: new THREE.Color(state.colorA || '#ffffff'),
+      emissiveIntensity: state.currentEmissive || 0.45,
+      roughness: 0.6,
+      metalness: 0.05
+    });
+    state.meshA = new THREE.Mesh(geoA, matA);
+    state.meshA.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
+    stringGroup.add(state.meshA);
+
+    const geoAoutline = new THREE.TubeGeometry(curveA, Math.max(4, SPRING_SEGMENTS), radiusMain + 0.06, 8, false);
+    const matAout = new THREE.MeshStandardMaterial({
+      color: state.colorA || '#ffffaa',
+      emissive: new THREE.Color(state.colorA || '#ffffaa'),
+      emissiveIntensity: (state.currentEmissive||0.45) * 1.6,
+      transparent: true,
+      opacity: 0.12,
+      side: THREE.DoubleSide
+    });
+    const outlineA = new THREE.Mesh(geoAoutline, matAout);
+    outlineA.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
+    state.outlineA = outlineA;
+    stringGroup.add(outlineA);
+  }
+
+  if(ptsB.length >= 2){
+    const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.6);
+    const radiusMain = 0.14;
+    const geoB = new THREE.TubeGeometry(curveB, Math.max(4, SPRING_SEGMENTS), radiusMain, 10, false);
+    const matB = new THREE.MeshStandardMaterial({
+      color: state.colorB || '#ffffff',
+      emissive: new THREE.Color(state.colorB || '#ffffff'),
+      emissiveIntensity: state.currentEmissive || 0.45,
+      roughness: 0.6,
+      metalness: 0.05
+    });
+    state.meshB = new THREE.Mesh(geoB, matB);
+    state.meshB.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
+    stringGroup.add(state.meshB);
+
+    const geoBoutline = new THREE.TubeGeometry(curveB, Math.max(4, SPRING_SEGMENTS), radiusMain + 0.06, 8, false);
+    const matBout = new THREE.MeshStandardMaterial({
+      color: state.colorB || '#ffffaa',
+      emissive: new THREE.Color(state.colorB || '#ffffaa'),
+      emissiveIntensity: (state.currentEmissive||0.45) * 1.6,
+      transparent: true,
+      opacity: 0.12,
+      side: THREE.DoubleSide
+    });
+    const outlineB = new THREE.Mesh(geoBoutline, matBout);
+    outlineB.scale.set(state.currentScale||1, state.currentScale||1, state.currentScale||1);
+    state.outlineB = outlineB;
+    stringGroup.add(outlineB);
+  }
 }
 
-function initLinkStatesFromRaw(){
-  // clear
-  linkStates.forEach((st,k)=>{ if(st.meshA) disposeMesh(st.meshA); if(st.meshB) disposeMesh(st.meshB); });
-  linkStates.clear(); while(stringGroup.children.length){ const c=stringGroup.children[0]; stringGroup.remove(c); try{ disposeMesh(c); }catch(e){} }
-  (rawData.links||[]).forEach(l=>{
-    const src = (typeof l.source === 'object') ? l.source.id : l.source;
-    const tgt = (typeof l.target === 'object') ? l.target.id : l.target;
-    const k = keyFor(src,tgt);
-    const st = makeLinkState();
-    st.colorA = verletEnabled ? (getNodeColor(src) || '#ffffff') : '#ffffff';
-    st.colorB = verletEnabled ? (getNodeColor(tgt) || '#ffffff') : '#ffffff';
-    linkStates.set(k, st);
-    rebuildTubeGeometry(st);
-  });
-}
-
-function getNodeById(id){ return (rawData.nodes||[]).find(n=>n.id===id); }
-function getNodeColor(id){ const n=getNodeById(id); return n ? (n.color||'#ffffff') : '#ffffff'; }
-
-// engine tick — update tube points to match node positions
+// engine tick — update tube points with computed offset curve for parallel groups
 Graph.onEngineTick(()=>{
+  // compute parallel groups once per tick
+  const groupsMap = buildParallelGroups();
+
   linkStates.forEach((st,k)=>{
     const [src,tgt] = k.split('::');
     const s = getNodeById(src); const t = getNodeById(tgt);
     if(!s || !t) return;
-    const sv = new THREE.Vector3(s.x||0,s.y||0,s.z||0);
-    const tv = new THREE.Vector3(t.x||0,t.y||0,t.z||0);
-    for(let i=0;i<SPRING_SEGMENTS;i++) st.points[i].lerpVectors(sv,tv,i/(SPRING_SEGMENTS-1));
+
+    const sv = new THREE.Vector3(s.x||0, s.y||0, s.z||0);
+    const tv = new THREE.Vector3(t.x||0, t.y||0, t.z||0);
+
+    // base straight-line points
+    for(let i=0;i<SPRING_SEGMENTS;i++){
+      st.points[i].lerpVectors(sv, tv, i/(SPRING_SEGMENTS-1));
+    }
+
+    // compute perpendicular once
+    const dir = new THREE.Vector3().subVectors(tv, sv).normalize();
+    let perp = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0,1,0));
+    if(perp.lengthSq() < 1e-6) perp = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(1,0,0));
+    perp.normalize();
+
+    // parallel group details
+    const uk = unorderedKey(src,tgt);
+    const group = groupsMap.get(uk) || [k];
+    const idx = group.indexOf(k);
+    const count = group.length;
+    const baseOffset = 0.36;
+    const offsetScalar = (count <= 1) ? 0 : ((idx - (count-1)/2) * baseOffset);
+
+    // apply offset that peaks at the middle of the link to form a nice arc
+    const N = SPRING_SEGMENTS;
+    for(let i=0;i<N;i++){
+      const tpos = i/(N-1);
+      const bulge = Math.sin(Math.PI * tpos);
+      const displacement = perp.clone().multiplyScalar(offsetScalar * bulge);
+      st.points[i].add(displacement);
+    }
+
+    // smoothly animate currentScale/currentEmissive -> target
+    const lerp = (a,b,f) => a + (b-a) * f;
+    st.currentScale = st.currentScale === undefined ? st.targetScale : lerp(st.currentScale, st.targetScale, 0.2);
+    st.currentEmissive = st.currentEmissive === undefined ? st.targetEmissive : lerp(st.currentEmissive, st.targetEmissive, 0.18);
+
     // set colors according to verletEnabled
     if(verletEnabled){ st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); }
-    else { st.colorA = st.colorB = '#ffffff'; }
-    rebuildTubeGeometry(st);
-  });
-});
+    else { st.colorA = st.colorB = '#ffffff'; st.currentEmissive = st.currentEmissive || 0.45; st.targetEmissive = st.targetEmissive || 0.45; }
 
-// toggle handler — keep it simple
-const verletToggle = document.getElementById('verletToggle');
-verletToggle.checked = verletEnabled;
-verletToggle.addEventListener('change', (e)=>{
-  verletEnabled = !!e.target.checked;
-  // update existing states immediately
-  linkStates.forEach((st,k)=>{ const [src,tgt] = k.split('::'); st.colorA = verletEnabled ? getNodeColor(src) : '#ffffff'; st.colorB = verletEnabled ? getNodeColor(tgt) : '#ffffff'; rebuildTubeGeometry(st); });
+    // rebuild geometry for this state using groupsMap (so offsets are consistent across parallels)
+    rebuildTubeGeometry(st, k, groupsMap);
+
+    // apply animated material properties/scale to freshly-created meshes (rebuildTubeGeometry creates them new each tick)
+    if(st.meshA){
+      try{
+        if(st.meshA.material && st.meshA.material.emissive) st.meshA.material.emissiveIntensity = st.currentEmissive;
+        st.meshA.scale.set(st.currentScale, st.currentScale, st.currentScale);
+      }catch(e){}
+    }
+    if(st.outlineA){
+      try{
+        if(st.outlineA.material && st.outlineA.material.emissive) st.outlineA.material.emissiveIntensity = st.currentEmissive * 1.6;
+        st.outlineA.scale.set(st.currentScale, st.currentScale, st.currentScale);
+      }catch(e){}
+    }
+    if(st.meshB){
+      try{
+        if(st.meshB.material && st.meshB.material.emissive) st.meshB.material.emissiveIntensity = st.currentEmissive;
+        st.meshB.scale.set(st.currentScale, st.currentScale, st.currentScale);
+      }catch(e){}
+    }
+    if(st.outlineB){
+      try{
+        if(st.outlineB.material && st.outlineB.material.emissive) st.outlineB.material.emissiveIntensity = st.currentEmissive * 1.6;
+        st.outlineB.scale.set(st.currentScale, st.currentScale, st.currentScale);
+      }catch(e){}
+    }
+
+  });
 });
 
 /* ------------------ Node glow utilities ------------------ */
@@ -242,11 +406,66 @@ function highlightLinkBetween(aId,bId,on){
   [k1,k2].forEach(k=>{
     const st = linkStates.get(k);
     if(!st) return;
-    if(on){ if(st._origColorA === undefined) st._origColorA = st.colorA; if(st._origColorB === undefined) st._origColorB = st.colorB; st.colorA = st.colorB = '#ffff66'; }
-    else { if(st._origColorA !== undefined) st.colorA = st._origColorA; if(st._origColorB !== undefined) st.colorB = st._origColorB; delete st._origColorA; delete st._origColorB; }
-    rebuildTubeGeometry(st);
+    if(on){
+      if(st._origColorA === undefined) st._origColorA = st.colorA;
+      if(st._origColorB === undefined) st._origColorB = st.colorB;
+      st.colorA = st.colorB = '#ffff66';
+    }
+    else {
+      if(st._origColorA !== undefined) st.colorA = st._origColorA;
+      if(st._origColorB !== undefined) st.colorB = st._origColorB;
+      delete st._origColorA; delete st._origColorB;
+    }
+    // also adjust animation targets
+    if(on){ st.targetScale = 1.8; st.targetEmissive = 1.6; }
+    else { st.targetScale = 1.0; st.targetEmissive = 0.45; }
   });
 }
+
+/* ------------------ Link hover animation wiring ------------------ */
+// When a link is hovered, set its state's animation targets to a larger scale & brighter emissive.
+// When hover leaves, revert. Also, hovering a node highlights its connected links.
+
+Graph.onLinkHover(link => {
+  // reset all targets to defaults first
+  linkStates.forEach(st=>{ st.targetScale = 1.0; st.targetEmissive = 0.45; });
+
+  if(!link) return;
+
+  const sId = (typeof link.source === 'object') ? link.source.id : link.source;
+  const tId = (typeof link.target === 'object') ? link.target.id : link.target;
+  // try both directions, pick whichever exists
+  const keysToTry = [ keyFor(sId,tId), keyFor(tId,sId) ];
+  for(const k of keysToTry){
+    const st = linkStates.get(k);
+    if(st){
+      st.targetScale = 1.85;
+      st.targetEmissive = 1.6;
+    }
+  }
+});
+
+// Highlight connected links when node hovered
+Graph.onNodeHover(node => {
+  // default: clear portal display if not hovered
+  if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`;
+  else document.getElementById('portal-display').innerText = '';
+
+  // revert all to defaults first
+  linkStates.forEach(st=>{ st.targetScale = 1.0; st.targetEmissive = 0.45; });
+
+  if(!node) return;
+  // find connected links
+  (rawData.links||[]).forEach(l=>{
+    const s = (typeof l.source==='object') ? l.source.id : l.source;
+    const t = (typeof l.target==='object') ? l.target.id : l.target;
+    if(s === node.id || t === node.id){
+      const k1 = keyFor(s,t), k2 = keyFor(t,s);
+      const st = linkStates.get(k1) || linkStates.get(k2);
+      if(st){ st.targetScale = 1.5; st.targetEmissive = 0.95; }
+    }
+  });
+});
 
 /* ------------------ Speech helpers ------------------ */
 function speakText(text, opts={rate:1.0,pitch:1.0}){
@@ -271,7 +490,7 @@ function connectionDescription(aId,bId){
   else if(bToA) desc = `${bTitle} links to ${aTitle}.`;
   else desc = `${aTitle} and ${bTitle} are connected.`;
   // shared neighbors (up to 2)
-  const neighborOf = id => { const s=new Set(); (rawData.links||[]).forEach(l=>{ if(l.source===id) s.add(l.target); if(l.target===id) s.add(l.source); }); return s; };
+  const neighborOf = id => { const s=new Set(); (rawData.links||[]).forEach(l=>{ const ss = (typeof l.source==='object')?l.source.id:l.source; const tt = (typeof l.target==='object')?l.target.id:l.target; if(ss===id) s.add(tt); if(tt===id) s.add(ss); }); return s; };
   const na = neighborOf(aId), nb = neighborOf(bId);
   const shared = Array.from(na).filter(x=>nb.has(x)).slice(0,2).map(id=>getNodeTitle(id));
   if(shared.length>0) desc += ` They both link to ${shared.join(' and ')}.`;
@@ -335,7 +554,7 @@ document.getElementById('applyColor').addEventListener('click', ()=>{
   const color = document.getElementById('colorInput').value;
   selectedNodes.forEach(nid => { const n = rawData.nodes.find(x=>x.id===nid); if(n) n.color = color; Graph.scene().traverse(obj=>{ if(obj.isMesh && obj.userData && obj.userData._nodeId === nid){ if(obj.material && obj.material.color) obj.material.color.set(color); } }); });
   // update tube halves
-  linkStates.forEach((st,k)=>{ const [src,tgt]=k.split('::'); st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); rebuildTubeGeometry(st); });
+  linkStates.forEach((st,k)=>{ const [src,tgt]=k.split('::'); st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); });
 });
 
 // reset selection
@@ -459,9 +678,72 @@ const regenBtn = document.getElementById('regenBtn'); regenBtn.addEventListener(
 // hover behavior
 Graph.onNodeHover(node=>{ if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`; else document.getElementById('portal-display').innerText = ''; });
 
+/* ------------------ Initialization of link states ------------------ */
+function getNodeById(id){ return (rawData.nodes||[]).find(n=>n.id===id); }
+function getNodeColor(id){ const n=getNodeById(id); return n ? (n.color||'#ffffff') : '#ffffff'; }
+
+function initLinkStatesFromRaw(){
+  // clear
+  linkStates.forEach((st,k)=>{ if(st.meshA) disposeMesh(st.meshA); if(st.meshB) disposeMesh(st.meshB); if(st.outlineA) disposeMesh(st.outlineA); if(st.outlineB) disposeMesh(st.outlineB); });
+  linkStates.clear(); while(stringGroup.children.length){ const c=stringGroup.children[0]; stringGroup.remove(c); try{ disposeMesh(c); }catch(e){} }
+  (rawData.links||[]).forEach(l=>{
+    const src = (typeof l.source === 'object') ? l.source.id : l.source;
+    const tgt = (typeof l.target === 'object') ? l.target.id : l.target;
+    const k = keyFor(src,tgt);
+    const st = makeLinkState();
+    st.colorA = verletEnabled ? (getNodeColor(src) || '#ffffff') : '#ffffff';
+    st.colorB = verletEnabled ? (getNodeColor(tgt) || '#ffffff') : '#ffffff';
+    // reset animation targets for new states
+    st.currentScale = 1.0; st.targetScale = 1.0;
+    st.currentEmissive = 0.45; st.targetEmissive = 0.45;
+    linkStates.set(k, st);
+  });
+}
+
+/* ------------------ Toggle handler for Verlet ------------------ */
+const verletToggle = document.getElementById('verletToggle');
+verletToggle.checked = verletEnabled;
+verletToggle.addEventListener('change', (e)=>{
+  verletEnabled = !!e.target.checked;
+  // update existing states immediately
+  linkStates.forEach((st,k)=>{ const [src,tgt] = k.split('::'); st.colorA = verletEnabled ? getNodeColor(src) : '#ffffff'; st.colorB = verletEnabled ? getNodeColor(tgt) : '#ffffff'; });
+});
+
+/* ------------------ Link hover / highlight done earlier uses highlightLinkBetween ------------------ */
+
+/* ------------------ Speech helpers, selection, regen, etc. are already defined above ------------------ */
+
 // initialize
 initLinkStatesFromRaw();
 
 </script>
+
+<!-- Collapsible HUD wiring script -->
+<script>
+(function(){
+  const hud = document.getElementById('hud');
+  const btn = document.getElementById('hud-toggle');
+  if(!hud || !btn) return;
+  // restore state
+  const collapsed = localStorage.getItem('hudCollapsed') === '1';
+  if(collapsed) hud.classList.add('collapsed');
+  else hud.classList.remove('collapsed');
+  btn.setAttribute('aria-expanded', (!collapsed).toString());
+  // click toggles
+  btn.addEventListener('click', () => {
+    const isCollapsed = hud.classList.toggle('collapsed');
+    btn.setAttribute('aria-expanded', (!isCollapsed).toString());
+    localStorage.setItem('hudCollapsed', isCollapsed ? '1' : '0');
+  });
+  // double-click header to toggle (nice UX)
+  const header = hud.querySelector('.hud-header');
+  if(header) header.addEventListener('dblclick', () => btn.click());
+  // optional: collapse on small screens automatically
+  if(window.innerWidth < 680 && !collapsed){
+    hud.classList.add('collapsed'); localStorage.setItem('hudCollapsed', '1');
+  }
+})();
+</script>
+
 </body>
 </html>
