@@ -468,21 +468,19 @@ async function regenGraph(){
 
   document.getElementById('hud-status').innerText = 'Fetching PubMed graph...';
   try{
-    // Distinct color palette for up to ~8 seeds
-    const colors = [
-      "#00bcd4","#ff9800","#8bc34a","#e91e63","#9c27b0","#ff5722","#03a9f4","#cddc39"
-    ];
-
+    const palette = ["#00bcd4","#ff9800","#8bc34a","#e91e63","#9c27b0","#ff5722","#03a9f4","#cddc39"];
     const allNodes = new Map();
     const allLinks = new Set();
 
-    // Iterate over each seed term separately
+    // Helper to key edges uniquely
+    const edgeKey = (a,b) => a < b ? `${a}->${b}` : `${b}->${a}`;
+
     for(let sIndex=0; sIndex<seeds.length; sIndex++){
       const seed = seeds[sIndex];
-      const color = colors[sIndex % colors.length];
+      const color = palette[sIndex % palette.length];
       let pmids = [];
 
-      // Determine PMIDs for this seed
+      // Find PMIDs for this seed
       if(/^\d+(,\d+)*$/.test(seed)){
         pmids = seed.split(',').map(x=>x.trim());
       }else{
@@ -490,21 +488,22 @@ async function regenGraph(){
       }
       if(pmids.length === 0){ console.warn(`No results for ${seed}`); continue; }
 
-      // Collect neighborhood of this seed
+      // Collect references for this seed
       const localPMIDs = new Set(pmids);
       for(const p of pmids){
         const refs = await getReferences(p, connectorLimit);
         for(const r of refs) localPMIDs.add(r);
       }
 
-      // Add nodes
+      // Add nodes for this seed
       for(const pmid of Array.from(localPMIDs)){
         const meta = await getArticleSummary(pmid);
         const prev = allNodes.get(pmid);
         if(prev){
-          // Mark overlap (shared node)
+          // Mark overlap across seeds
           prev.shared = true;
-          prev.color = "#ffffff"; // neutral for overlap
+          prev.color = "#ffffff";
+          prev.seedGroups.push(seed);
         }else{
           const node = {
             id: pmid,
@@ -513,46 +512,76 @@ async function regenGraph(){
             summary: meta.abstract,
             portals: meta.journal,
             color: color,
-            seedGroup: seed
+            seedGroup: seed,
+            seedGroups: [seed],
+            mesh: meta.mesh || []
           };
           allNodes.set(pmid, node);
         }
       }
 
-      // Add edges for this seed
+      // Citation edges for this seed
       for(const a of pmids){
         const refs = await getReferences(a, connectorLimit);
         for(const b of refs){
-          const key = `${a}->${b}`;
-          if(!allLinks.has(key)) allLinks.add(key);
+          const key = edgeKey(a,b);
+          if(!allLinks.has(key)){
+            allLinks.add(key);
+          }
+        }
+      }
+
+      // Intra-seed edges (light gray) to cluster the seed's own articles
+      const localList = Array.from(localPMIDs);
+      for(let i=0;i<localList.length-1;i++){
+        const a = localList[i], b = localList[i+1];
+        const key = edgeKey(a,b);
+        if(!allLinks.has(key)){
+          allLinks.add(key);
         }
       }
     }
 
-    // Assemble graph data
+    // Convert to arrays for graph
     const nodes = Array.from(allNodes.values());
     const links = Array.from(allLinks).map(edge=>{
       const [src,tgt] = edge.split("->");
-      return { source:src, target:tgt, color:"#cccccc" };
+      const srcNode = allNodes.get(src);
+      const tgtNode = allNodes.get(tgt);
+      let color = "#cccccc";
+      let semantic = false;
+      // semantic link if shared MeSH between these nodes
+      if(srcNode && tgtNode && srcNode.mesh && tgtNode.mesh){
+        const shared = srcNode.mesh.filter(x=>tgtNode.mesh.includes(x));
+        if(shared.length > 0){
+          color = "#66bb6a";
+          semantic = true;
+        }
+      }
+      return { source:src, target:tgt, color, semantic };
     });
 
+    // Push to ForceGraph
     rawData = { nodes, links };
     window.rawData = rawData;
     Graph.graphData(rawData);
     initLinkStatesFromRaw();
+    Graph
+      .linkColor(l => l.semantic ? '#66bb6a' : '#cccccc')
+      .linkWidth(l => l.semantic ? 1.5 : 0.8)
+      .linkDirectionalParticles(l => l.semantic ? 2 : 0)
+      .linkDirectionalParticleSpeed(l => l.semantic ? 0.003 : 0.0);
     Graph.refresh();
 
-    // HUD summary
     const total = nodes.length;
     const shared = nodes.filter(n=>n.shared).length;
-    document.getElementById('hud-status').innerText = 
-      `Fetched ${total} articles (${shared} shared between seeds).`;
+    document.getElementById('hud-status').innerText =
+      `Fetched ${total} articles (${shared} shared). ${links.length} edges total.`;
   }catch(e){
     console.error('regen error', e);
     document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)';
   }
 }
-
 // wire regen button
 const regenBtn = document.getElementById('regenBtn'); regenBtn.addEventListener('click', ()=>{ regenGraph(); });
 
