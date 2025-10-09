@@ -480,7 +480,8 @@ async function regenGraph(){
     const allLinks = new Set();
 
     // Helper to key edges uniquely
-    const edgeKey = (a,b) => a < b ? `${a}->${b}` : `${b}->${a}`;
+const edgeKey = (a,b) => `${a}->${b}`;
+
 
     for(let sIndex=0; sIndex<seeds.length; sIndex++){
       const seed = seeds[sIndex];
