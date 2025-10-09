@@ -1,0 +1,776 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>template_fixed3 — patched (Verlet, Regen, Adjacent TTS) — collapsible HUD</title>
+<style>
+  body { margin:0; overflow:hidden; background:#000; }
+  /* HUD base (keeps original look) */
+  #hud { position:absolute; top:8px; right:8px; color:white; font-family:sans-serif; font-size:13px;
+          background:rgba(0,0,0,0.8); padding:12px; border-radius:10px; z-index:30; width:420px; }
+  #portal-display { position:absolute; top:8px; left:8px; color:white; font-family:sans-serif; font-size:14px; z-index:30; max-width:600px; white-space:pre-wrap; }
+  .btn { padding:6px 8px; margin-right:6px; }
+  .small { font-size:12px; color:#ddd; }
+  #hud .row { margin-top:8px; }
+  #hud .muted { color:#999; font-size:12px; }
+
+  /* Collapsible HUD styles */
+  #hud { transition: width 210ms ease, height 210ms ease, right 150ms ease; overflow: visible; }
+  #hud .hud-header { cursor: default; }
+  #hud .hud-content { transition: max-height 260ms ease, opacity 180ms ease; max-height: 1200px; opacity: 1; overflow: hidden; }
+  #hud.collapsed { width:48px !important; height:48px !important; padding:6px !important; overflow: visible; }
+  #hud.collapsed .hud-content { max-height: 0; opacity: 0; pointer-events: none; }
+  #hud.collapsed .small, #hud.collapsed .muted, #hud.collapsed .row, #hud.collapsed input, #hud.collapsed button { display: none; }
+  #hud #hud-toggle { transition: transform 180ms ease; background:transparent;border:none;color:#fff;font-size:14px; }
+  #hud.collapsed #hud-toggle { transform: rotate(180deg); }
+
+</style>
+</head>
+<body>
+<div id="3d-graph" style="width:100%;height:100%;"></div>
+<div id="portal-display"></div>
+
+<!-- Collapsible HUD -->
+<div id="hud" class="expanded" role="region" aria-label="HUD">
+  <div class="hud-header" style="display:flex;align-items:center;justify-content:space-between;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button id="hud-toggle" aria-expanded="true" title="Collapse/Expand HUD" style="width:28px;height:28px;border-radius:6px;border:none;background:transparent;color:#fff;cursor:pointer;font-weight:bold;">
+        ◀
+      </button>
+      <div><b>Wikipedia Graph (patched)</b></div>
+    </div>
+  </div>
+
+  <div class="hud-content">
+    <div class="row">
+      <label class="small">Seed articles (comma-separated):<br>
+        <input id="seedInput" type="text" style="width:380px;" placeholder="Dog,Cat">
+      </label>
+    </div>
+
+    <div class="row">
+      <label class="small">Direct-neighbor limit:<br>
+        <input id="limitInput" type="number" style="width:100px;" placeholder="20">
+      </label>
+      <label class="small" style="margin-left:10px;">Connector limit:<br>
+        <input id="connectorInput" type="number" value="20" style="width:90px;">
+      </label>
+    </div>
+
+    <div class="row">
+      <label><input id="verletToggle" type="checkbox"> Enable Verlet (simple tubes)</label>
+      <div class="muted">(simple tube halves colored by node when enabled; no strumming)</div>
+    </div>
+
+    <div class="row">
+      <button id="regenBtn" class="btn">Regenerate</button>
+      <button id="resetSelect" class="btn">Clear Selection</button>
+      <button id="hud-merge-nodes-btn" class="btn">Merge Nodes</button>
+      <button id="hud-read-summary-btn" class="btn">Read Summary (TTS)</button>
+      <label style="margin-left:8px;">
+        <input id="readAdjacent" type="checkbox"> <span class="small">Auto-read adjacent</span>
+      </label>
+    </div>
+
+    <div class="row">
+      <label class="small">Color picker for selected:</label><br>
+      <input id="colorInput" type="color" value="#ff0000" style="width:90px;">
+      <button id="applyColor" class="btn">Apply Color</button>
+    </div>
+
+    <div class="row">
+      <label><input id="titleOverlayToggle" type="checkbox"> <span class="small">Show titles over nodes</span></label>
+      <label style="margin-left:12px;"><input id="linkHoverToggle" type="checkbox" checked> <span class="small">Highlight line on hover</span></label>
+    </div>
+
+    <div id="hud-status" class="row" style="margin-top:10px;color:#04B819;"></div>
+  </div>
+</div>
+
+<!-- libs -->
+<script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph"></script>
+<script src="https://unpkg.com/three-spritetext"></script>
+
+<script>
+// Small global error helper
+window.onerror = function(msg, src, ln, col, err){
+  console.error('GLOBAL ERROR', msg, src+':'+ln+':'+col, err);
+  const hud = document.getElementById('hud-status'); if(hud) hud.innerText = 'JS ERROR — see console';
+  return false;
+};
+</script>
+
+<!-- try accept server-injected data -->
+<script>
+try{ window.rawData = __DATA__; }catch(e){ window.rawData = { nodes: [], links: [] }; }
+let rawData = window.rawData; // mutable reference
+</script>
+
+<script>
+/* ================ Patched client code ================
+   Fixes applied in this patch:
+   1) Regen: robust dependable regeneration (avoids duplicate variable declarations,
+      updates window.rawData and Graph properly, proper UI status updates)
+   2) Verlet: checkbox now toggles a simple tube rendering mode (no strumming) and
+      rebuilds tube visuals immediately
+   3) Adjacent reading: speakNode now finds a neighbor on the same edge, speaks
+      a connection description (directionality / mutual / shared neighbors), highlights
+      the connecting tube while speaking, then recurses
+   4) Misc: use string keys for linkStates map (reliable lookups), extra error handling
+*/
+
+const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
+  .graphData(rawData)
+  .nodeRelSize(4)
+  .nodeLabel(n => {
+    if(n.mergedArticles) return `<b>${n.mergedArticles.join(' + ')}</b>\n${(n.mergedSummaries||[]).join('\n\n')}`;
+    return `<b>${n.name}</b>\n${n.summary || ''}`;
+  })
+  .nodeThreeObject(node => {
+    // nodes as spheres
+    if(node.mergedColors && Array.isArray(node.mergedColors) && node.mergedColors.length >= 2){
+      const cA = new THREE.Color(node.mergedColors[0] || '#ff0000');
+      const cB = new THREE.Color(node.mergedColors[1] || '#0000ff');
+      const geo = new THREE.SphereGeometry(Math.max(0.8, (node.val||12)/8), 24, 24);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: { colorA: { value: cA }, colorB: { value: cB } },
+        vertexShader: 'varying vec3 vPos; void main(){ vPos = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+        fragmentShader: 'uniform vec3 colorA; uniform vec3 colorB; varying vec3 vPos; void main(){ if(vPos.x < 0.0) gl_FragColor = vec4(colorA,1.0); else gl_FragColor = vec4(colorB,1.0); }'
+      });
+      const mesh = new THREE.Mesh(geo, mat); mesh.userData._nodeId = node.id; return mesh;
+    } else {
+      const geo = new THREE.SphereGeometry(Math.max(0.8, (node.val||12)/8), 16, 16);
+      const mat = new THREE.MeshStandardMaterial({ color: node.color || '#ffffff', emissive: new THREE.Color(0x000000), emissiveIntensity: 0 });
+      const mesh = new THREE.Mesh(geo, mat); mesh.userData._nodeId = node.id; return mesh;
+    }
+  })
+  .linkOpacity(1)
+  .backgroundColor('#000');
+
+Graph.cameraPosition({ z: Math.max(200, Math.min(2000, (rawData.nodes||[]).length*4)) });
+
+/* ------------------ Tube "Verlet" (simple) ------------------ */
+const stringGroup = new THREE.Group(); Graph.scene().add(stringGroup);
+const SPRING_SEGMENTS = 18;
+let verletEnabled = false;
+// store link states using stable string keys: "src::tgt"
+const linkStates = new Map();
+
+function keyFor(src,tgt){ return `${src}::${tgt}`; }
+function otherKey(src,tgt){ return `${tgt}::${src}`; }
+
+function makeInitialPoints(){ const pts=[]; for(let i=0;i<SPRING_SEGMENTS;i++) pts.push(new THREE.Vector3()); return pts; }
+
+function makeLinkState(){ return { points: makeInitialPoints(), meshA:null, meshB:null, colorA:'#ffffff', colorB:'#ffffff', _orig:{} }; }
+
+function disposeMesh(m){ try{ if(!m) return; if(m.geometry) m.geometry.dispose(); if(m.material){ if(Array.isArray(m.material)) m.material.forEach(x=>x.dispose()); else m.material.dispose(); } }catch(e){console.warn('dispose',e);} }
+
+function rebuildTubeGeometry(state){
+  if(state.meshA){ stringGroup.remove(state.meshA); disposeMesh(state.meshA); state.meshA=null; }
+  if(state.meshB){ stringGroup.remove(state.meshB); disposeMesh(state.meshB); state.meshB=null; }
+  const half = Math.floor(SPRING_SEGMENTS/2);
+  const ptsA = state.points.slice(0, half+1);
+  const ptsB = state.points.slice(half, state.points.length);
+  if(ptsA.length>=2){ const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5); const geoA = new THREE.TubeGeometry(curveA, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matA = new THREE.MeshStandardMaterial({ color: state.colorA || '#ffffff' }); state.meshA = new THREE.Mesh(geoA, matA); stringGroup.add(state.meshA); }
+  if(ptsB.length>=2){ const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5); const geoB = new THREE.TubeGeometry(curveB, Math.max(2, SPRING_SEGMENTS), 0.12, 8, false); const matB = new THREE.MeshStandardMaterial({ color: state.colorB || '#ffffff' }); state.meshB = new THREE.Mesh(geoB, matB); stringGroup.add(state.meshB); }
+}
+
+function initLinkStatesFromRaw(){
+  // clear
+  linkStates.forEach((st,k)=>{ if(st.meshA) disposeMesh(st.meshA); if(st.meshB) disposeMesh(st.meshB); });
+  linkStates.clear(); while(stringGroup.children.length){ const c=stringGroup.children[0]; stringGroup.remove(c); try{ disposeMesh(c); }catch(e){} }
+  (rawData.links||[]).forEach(l=>{
+    const src = (typeof l.source === 'object') ? l.source.id : l.source;
+    const tgt = (typeof l.target === 'object') ? l.target.id : l.target;
+    const k = keyFor(src,tgt);
+    const st = makeLinkState();
+    st.colorA = verletEnabled ? (getNodeColor(src) || '#ffffff') : '#ffffff';
+    st.colorB = verletEnabled ? (getNodeColor(tgt) || '#ffffff') : '#ffffff';
+    linkStates.set(k, st);
+    rebuildTubeGeometry(st);
+  });
+}
+
+function getNodeById(id){ return (rawData.nodes||[]).find(n=>n.id===id); }
+function getNodeColor(id){ const n=getNodeById(id); return n ? (n.color||'#ffffff') : '#ffffff'; }
+
+// engine tick — update tube points to match node positions
+Graph.onEngineTick(()=>{
+  linkStates.forEach((st,k)=>{
+    const [src,tgt] = k.split('::');
+    const s = getNodeById(src); const t = getNodeById(tgt);
+    if(!s || !t) return;
+    const sv = new THREE.Vector3(s.x||0,s.y||0,s.z||0);
+    const tv = new THREE.Vector3(t.x||0,t.y||0,t.z||0);
+    for(let i=0;i<SPRING_SEGMENTS;i++) st.points[i].lerpVectors(sv,tv,i/(SPRING_SEGMENTS-1));
+    // set colors according to verletEnabled
+    if(verletEnabled){ st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); }
+    else { st.colorA = st.colorB = '#ffffff'; }
+    rebuildTubeGeometry(st);
+  });
+});
+
+// toggle handler — keep it simple
+const verletToggle = document.getElementById('verletToggle');
+verletToggle.checked = verletEnabled;
+verletToggle.addEventListener('change', (e)=>{
+  verletEnabled = !!e.target.checked;
+  // update existing states immediately
+  linkStates.forEach((st,k)=>{ const [src,tgt] = k.split('::'); st.colorA = verletEnabled ? getNodeColor(src) : '#ffffff'; st.colorB = verletEnabled ? getNodeColor(tgt) : '#ffffff'; rebuildTubeGeometry(st); });
+});
+
+/* ------------------ Node glow utilities ------------------ */
+const originalMaterialState = new Map();
+function setGlow(nodeId, on){
+  Graph.scene().traverse(obj=>{
+    if(obj.isMesh && obj.userData && obj.userData._nodeId === nodeId){
+      try{
+        const mat = obj.material;
+        if(on){
+          if(!originalMaterialState.has(nodeId)){
+            if(mat instanceof THREE.ShaderMaterial){
+              const ca = mat.uniforms && mat.uniforms.colorA ? mat.uniforms.colorA.value.clone() : new THREE.Color(0xff0000);
+              const cb = mat.uniforms && mat.uniforms.colorB ? mat.uniforms.colorB.value.clone() : new THREE.Color(0x0000ff);
+              originalMaterialState.set(nodeId,{type:'shader',colorA:ca,colorB:cb,scale:obj.scale.clone()});
+              if(mat.uniforms && mat.uniforms.colorA) mat.uniforms.colorA.value = new THREE.Color(0xffff66);
+              if(mat.uniforms && mat.uniforms.colorB) mat.uniforms.colorB.value = new THREE.Color(0xffff66);
+            } else {
+              const col = mat.color ? mat.color.clone() : new THREE.Color(0xffffff);
+              const emiss = mat.emissive ? mat.emissive.clone() : new THREE.Color(0x000000);
+              originalMaterialState.set(nodeId,{type:'standard',color:col,emissive:emiss,scale:obj.scale.clone()});
+              if(mat.color) mat.color.set(0xffff66);
+              if(mat.emissive) { mat.emissive.set(0xffff00); mat.emissiveIntensity = 0.9; }
+            }
+            obj.scale.set(obj.scale.x*1.4,obj.scale.y*1.4,obj.scale.z*1.4);
+          }
+        } else {
+          const s = originalMaterialState.get(nodeId);
+          if(s){
+            if(s.type === 'shader'){
+              if(mat.uniforms && mat.uniforms.colorA) mat.uniforms.colorA.value = s.colorA;
+              if(mat.uniforms && mat.uniforms.colorB) mat.uniforms.colorB.value = s.colorB;
+            } else {
+              if(mat.color && s.color) mat.color.copy(s.color);
+              if(mat.emissive && s.emissive) { mat.emissive.copy(s.emissive); mat.emissiveIntensity = 0; }
+            }
+            if(s.scale) obj.scale.copy(s.scale);
+            originalMaterialState.delete(nodeId);
+          }
+        }
+      } catch(e){ console.warn('setGlow error', e); }
+    }
+  });
+}
+
+/* ------------------ Link highlight (temporary) ------------------ */
+function highlightLinkBetween(aId,bId,on){
+  const k1 = keyFor(aId,bId), k2 = keyFor(bId,aId);
+  [k1,k2].forEach(k=>{
+    const st = linkStates.get(k);
+    if(!st) return;
+    if(on){ if(st._origColorA === undefined) st._origColorA = st.colorA; if(st._origColorB === undefined) st._origColorB = st.colorB; st.colorA = st.colorB = '#ffff66';
+      // also change ForceGraph link color (so flat links or any other link visuals also reflect hover)
+      try{ if(on){ if(linkObj && linkObj._origColor === undefined) linkObj._origColor = linkObj.color; if(linkObj) linkObj.color = '#ffff66'; try{ Graph.refresh(); }catch(e){} } }catch(e){} }
+    else { if(st._origColorA !== undefined) st.colorA = st._origColorA; if(st._origColorB !== undefined) st.colorB = st._origColorB; delete st._origColorA; delete st._origColorB; }
+    rebuildTubeGeometry(st);
+  });
+}
+
+/* ------------------ Speech helpers ------------------ */
+function speakText(text, opts={rate:1.0,pitch:1.0}){
+  return new Promise(resolve=>{
+    if(!('speechSynthesis' in window)){ alert(text); resolve(); return; }
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate = opts.rate || 1.0; utt.pitch = opts.pitch || 1.0;
+    utt.onend = ()=>resolve(); utt.onerror = ()=>resolve();
+    window.speechSynthesis.speak(utt);
+  });
+}
+
+/* ------------------ Connection description ------------------ */
+function connectionDescription(aId,bId){
+  const links = rawData.links || [];
+  const aToB = links.some(l => ((l.source===aId && l.target===bId) || (typeof l.source==='object' && l.source.id===aId && typeof l.target==='object' && l.target.id===bId)) );
+  const bToA = links.some(l => ((l.source===bId && l.target===aId) || (typeof l.source==='object' && l.source.id===bId && typeof l.target==='object' && l.target.id===aId)) );
+  let desc = '';
+  const aTitle = getNodeTitle(aId), bTitle = getNodeTitle(bId);
+  if(aToB && bToA) desc = `${aTitle} and ${bTitle} link to each other.`;
+  else if(aToB) desc = `${aTitle} links to ${bTitle}.`;
+  else if(bToA) desc = `${bTitle} links to ${aTitle}.`;
+  else desc = `${aTitle} and ${bTitle} are connected.`;
+  // shared neighbors (up to 2)
+  const neighborOf = id => { const s=new Set(); (rawData.links||[]).forEach(l=>{ if(l.source===id) s.add(l.target); if(l.target===id) s.add(l.source); }); return s; };
+  const na = neighborOf(aId), nb = neighborOf(bId);
+  const shared = Array.from(na).filter(x=>nb.has(x)).slice(0,2).map(id=>getNodeTitle(id));
+  if(shared.length>0) desc += ` They both link to ${shared.join(' and ')}.`;
+  return desc;
+}
+function getNodeTitle(id){ const n=(rawData.nodes||[]).find(x=>x.id===id); return n ? n.name : id; }
+
+/* ------------------ speakNode + auto-adjacent ------------------ */
+async function speakNode(node, visited=new Set()){
+  if(!node || visited.has(node.id)) return;
+  visited.add(node.id);
+  document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`;
+  setGlow(node.id, true);
+  // cancel queued speech? We append; but start fresh for button
+  await speakText(`${node.name}. ${node.summary || 'No summary available.'}`);
+  setGlow(node.id, false);
+  if(!document.getElementById('readAdjacent').checked) return;
+  // gather neighbors on same edge
+  const neighborIds = new Set();
+  (rawData.links||[]).forEach(l=>{
+    const s = (typeof l.source==='object') ? l.source.id : l.source;
+    const t = (typeof l.target==='object') ? l.target.id : l.target;
+    if(s === node.id && t) neighborIds.add(t);
+    if(t === node.id && s) neighborIds.add(s);
+  });
+  const neighbors = Array.from(neighborIds).map(id => getNodeById(id)).filter(n=>n && !visited.has(n.id));
+  if(neighbors.length===0) return;
+  const next = neighbors[Math.floor(Math.random()*neighbors.length)];
+  const desc = connectionDescription(node.id, next.id);
+  // highlight link while speaking
+  highlightLinkBetween(node.id, next.id, true);
+  await speakText(desc);
+  highlightLinkBetween(node.id, next.id, false);
+  await speakNode(next, visited);
+}
+
+// HUD read button
+document.getElementById('hud-read-summary-btn').addEventListener('click', async ()=>{
+  const sel = Array.from(selectedNodes);
+  if(sel.length === 0){ alert('No node selected.'); return; }
+  const node = (rawData.nodes||[]).find(n=>n.id===sel[0]);
+  if(!node){ alert('Selected node not found.'); return; }
+  if(window.speechSynthesis) window.speechSynthesis.cancel();
+  await speakNode(node, new Set());
+});
+
+/* ------------------ Selection & interactions ------------------ */
+let selectedNodes = new Set();
+
+Graph.onNodeClick((node, event) => {
+  if(window.mKeyDown){ playNodeSequence(node); return; }
+  const shift = event && event.shiftKey;
+  if(shift){ if(selectedNodes.has(node.id)) selectedNodes.delete(node.id); else selectedNodes.add(node.id); }
+  else { selectedNodes.clear(); selectedNodes.add(node.id); }
+  Graph.scene().traverse(obj=>{ if(obj.isMesh && obj.userData && obj.userData._nodeId){ const id = obj.userData._nodeId; obj.scale.set(1,1,1); if(selectedNodes.has(id)) obj.scale.set(1.4,1.4,1.4); } });
+  document.getElementById('hud-status').innerText = `Selected ${selectedNodes.size} node(s).`;
+});
+
+// apply color
+document.getElementById('applyColor').addEventListener('click', ()=>{
+  const color = document.getElementById('colorInput').value;
+  selectedNodes.forEach(nid => { const n = rawData.nodes.find(x=>x.id===nid); if(n) n.color = color; Graph.scene().traverse(obj=>{ if(obj.isMesh && obj.userData && obj.userData._nodeId === nid){ if(obj.material && obj.material.color) obj.material.color.set(color); } }); });
+  // update tube halves
+  linkStates.forEach((st,k)=>{ const [src,tgt]=k.split('::'); st.colorA = getNodeColor(src); st.colorB = getNodeColor(tgt); rebuildTubeGeometry(st); });
+});
+
+// reset selection
+document.getElementById('resetSelect').addEventListener('click', ()=>{ selectedNodes.clear(); Graph.scene().traverse(obj=>{ if(obj.isMesh && obj.userData && obj.userData._nodeId) obj.scale.set(1,1,1); }); document.getElementById('hud-status').innerText = 'Selection cleared.'; });
+
+// merge nodes (keeps previous behavior)
+document.getElementById('hud-merge-nodes-btn').addEventListener('click', ()=>{
+  const sel = Array.from(selectedNodes); if(sel.length < 2){ alert('Select at least two nodes to merge (Shift+Click).'); return; }
+  const idsToMerge = sel.slice(0,2); const toMerge = idsToMerge.map(id=>rawData.nodes.find(n=>n.id===id)).filter(Boolean); if(toMerge.length<2){ alert('Merge nodes missing'); return; }
+  const mergedId = idsToMerge.join('||'); let avgX=0,avgY=0,avgZ=0; toMerge.forEach(n=>{ avgX += (n.x||0); avgY += (n.y||0); avgZ += (n.z||0); }); avgX/=toMerge.length; avgY/=toMerge.length; avgZ/=toMerge.length;
+  const mergedNode = { id:mergedId, name:mergedId, val: Math.max(...toMerge.map(n=>n.val||12)), mergedArticles:[], mergedSummaries:[], mergedColors: toMerge.slice(0,2).map(n=>n.color||'#ff0000'), color: toMerge[0].color||'#ffffff', x:avgX, y:avgY, z:avgZ };
+  toMerge.forEach(n=>{ mergedNode.mergedArticles.push(...(n.mergedArticles||[n.name||n.id])); mergedNode.mergedSummaries.push(...(n.mergedSummaries||[n.summary||''])); });
+  const mergeSet = new Set(idsToMerge); const rewired = [];
+  (rawData.links||[]).forEach(l=>{ const src = (typeof l.source==='object')?l.source.id:l.source; const tgt = (typeof l.target==='object')?l.target.id:l.target; const newSrc = mergeSet.has(src)?mergedId:src; const newTgt = mergeSet.has(tgt)?mergedId:tgt; if(newSrc===newTgt) return; rewired.push({ source:newSrc, target:newTgt, color: l.color||'#cccccc' }); });
+  const seen = new Set(); const dedup=[]; rewired.forEach(l=>{ const k=`${l.source}>>${l.target}`; if(seen.has(k)) return; seen.add(k); dedup.push(l); });
+  rawData.nodes = (rawData.nodes||[]).filter(n=>!mergeSet.has(n.id)); rawData.nodes.push(mergedNode); rawData.links = dedup;
+  Graph.graphData(rawData); initLinkStatesFromRaw(); Graph.refresh(); selectedNodes.clear(); document.getElementById('hud-status').innerText = `Merged ${idsToMerge.join(', ')} → ${mergedId}`;
+});
+
+/* ------------------ melodic m+click playback (simpler) ------------------ */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let selectedScale = [0,2,3,5,7,9,11]; let selectedOctave = 4; let selectedInstrument = 'sine';
+window.mKeyDown = false; document.addEventListener('keydown', e=>{ if(e.key && e.key.toLowerCase()==='m') window.mKeyDown = true; }); document.addEventListener('keyup', e=>{ if(e.key && e.key.toLowerCase()==='m') window.mKeyDown = false; });
+function letterToNote(ch){ const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ'; const idx = alphabet.indexOf(ch.toUpperCase()); if(idx===-1) return null; return 12*selectedOctave + selectedScale[idx % selectedScale.length]; }
+function playMidi(midi,d=300,vol=0.3){ if(midi==null) return; const o=audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type = selectedInstrument; o.frequency.value = 440 * Math.pow(2,(midi-69)/12); g.gain.value = vol; o.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + d/1000); }
+async function playWord(w,d=180){ for(const ch of w){ playMidi(letterToNote(ch), d, 0.35); await new Promise(r=>setTimeout(r,d)); } }
+async function playNodeSequence(node, visited=new Set()){ if(!node || visited.has(node.id)) return; visited.add(node.id); document.getElementById('portal-display').innerText = node.mergedSummaries ? node.mergedSummaries.join('\n\n') : (node.summary || ''); const orig = node.color; node.color = '#FF00FF'; Graph.refresh(); (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#FF00FF'; l.opacity=1; }}); Graph.refresh(); await playWord(node.name || ''); node.color = orig; (rawData.links||[]).forEach(l=>{ if(l.source===node.id||l.target===node.id){ l.color='#cccccc'; l.opacity=0.6; }}); Graph.refresh(); const connected = (rawData.links||[]).filter(l=>l.source===node.id).map(l=> getNodeById(l.target)); for(const n of connected) await playNodeSequence(n, visited); }
+
+/* ------------------ Regen implementation (PubMed / NCBI) ------------------ */
+
+async function entrezFetch(endpoint, params){
+  const url = new URL(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/${endpoint}.fcgi`);
+  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
+  const r = await fetch(url.toString());
+  if(!r.ok) throw new Error(`Entrez error: ${r.status}`);
+  return await r.text();
+}
+
+async function getPMIDsFromSearch(term, limit=20){
+  if(!term) return [];
+  const xml = await entrezFetch('esearch', { db:'pubmed', term, retmax:limit, retmode:'json' });
+  try{
+    const j = JSON.parse(xml);
+    return j.esearchresult?.idlist || [];
+  }catch(e){ console.warn('search parse fail', e); return []; }
+}
+
+async function getArticleSummary(pmid){
+  // combine ESummary + EFetch for robustness
+  let title='', abstract='', journal='', pubdate='';
+  try{
+    const j = await (await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${pmid}&retmode=json`)).json();
+    const res = j.result?.[pmid] || {};
+    title = res.title || '';
+    journal = res.fulljournalname || '';
+    pubdate = res.pubdate || '';
+  }catch(e){}
+
+  try{
+    const xml = await (await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${pmid}&retmode=xml`)).text();
+    const dom = new DOMParser().parseFromString(xml, 'text/xml');
+    if(!title){
+      const el = dom.querySelector('ArticleTitle, Title');
+      if(el) title = el.textContent.trim();
+    }
+    const absNodes = dom.querySelectorAll('AbstractText, Abstract');
+    if(absNodes.length){
+      abstract = Array.from(absNodes).map(x => x.textContent.trim()).filter(Boolean).join('\n\n');
+    }
+  }catch(e){}
+  if(!title) title = `(Untitled article, PMID ${pmid})`;
+  if(title.length > 120) title = title.slice(0,117)+'...';
+  if(!abstract) abstract = '(No abstract available.)';
+  return { pmid, title, abstract, journal, pubdate };
+}
+
+async function getReferences(pmid, limit=50){
+  try{
+    const j = await (await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pubmed&id=${pmid}&linkname=pubmed_pubmed_refs&retmode=json`)).json();
+    const out = [];
+    for(const ls of j.linksets || []){
+      for(const ln of ls.linksetdb || []){
+        for(const l of ln.links || []){
+          if(out.length >= limit) break;
+          out.push(l);
+        }
+      }
+    }
+    return Array.from(new Set(out.map(String)));
+  }catch(e){ console.warn('refs fail', e); return []; }
+}
+
+async function regenGraph(){
+  const seedText = document.getElementById('seedInput').value.trim();
+  const seeds = seedText ? seedText.split(',').map(s=>s.trim()).filter(Boolean) : [];
+  const limitVal = parseInt(document.getElementById('limitInput').value);
+  const connectorLimit = parseInt(document.getElementById('connectorInput').value) || 20;
+  const limit = isNaN(limitVal) ? 20 : limitVal;
+
+  if(seeds.length === 0){ alert("Enter at least one search term or PMID."); return; }
+
+  document.getElementById('hud-status').innerText = 'Fetching PubMed graph...';
+  try{
+    const palette = ["#00bcd4","#ff9800","#8bc34a","#e91e63","#9c27b0","#ff5722","#03a9f4","#cddc39"];
+    const allNodes = new Map();
+    const allLinks = new Set();
+
+    // Helper to key edges uniquely
+    const edgeKey = (a,b) => a < b ? `${a}->${b}` : `${b}->${a}`;
+
+    for(let sIndex=0; sIndex<seeds.length; sIndex++){
+      const seed = seeds[sIndex];
+      const color = palette[sIndex % palette.length];
+      let pmids = [];
+
+      // Find PMIDs for this seed
+      if(/^\d+(,\d+)*$/.test(seed)){
+        pmids = seed.split(',').map(x=>x.trim());
+      }else{
+        pmids = await getPMIDsFromSearch(seed, limit);
+      }
+      if(pmids.length === 0){ console.warn(`No results for ${seed}`); continue; }
+
+      // Collect references for this seed
+      const localPMIDs = new Set(pmids);
+      for(const p of pmids){
+        const refs = await getReferences(p, connectorLimit);
+        for(const r of refs) localPMIDs.add(r);
+      }
+
+      // Add nodes for this seed
+      for(const pmid of Array.from(localPMIDs)){
+        const meta = await getArticleSummary(pmid);
+        const prev = allNodes.get(pmid);
+        if(prev){
+          // Mark overlap across seeds
+          prev.shared = true;
+          prev.color = "#ffffff";
+          prev.seedGroups.push(seed);
+        }else{
+          const node = {
+            id: pmid,
+            name: meta.title,
+            val: 12,
+            summary: meta.abstract,
+            portals: meta.journal,
+            color: color,
+            seedGroup: seed,
+            seedGroups: [seed],
+            mesh: meta.mesh || []
+          };
+          allNodes.set(pmid, node);
+        }
+      }
+
+      // Citation edges for this seed
+      for(const a of pmids){
+        const refs = await getReferences(a, connectorLimit);
+        for(const b of refs){
+          const key = edgeKey(a,b);
+          if(!allLinks.has(key)){
+            allLinks.add(key);
+          }
+        }
+      }
+
+      // Intra-seed edges (light gray) to cluster the seed's own articles
+      const localList = Array.from(localPMIDs);
+      for(let i=0;i<localList.length-1;i++){
+        const a = localList[i], b = localList[i+1];
+        const key = edgeKey(a,b);
+        if(!allLinks.has(key)){
+          allLinks.add(key);
+        }
+      }
+    }
+
+    // Convert to arrays for graph
+    const nodes = Array.from(allNodes.values());
+    const links = Array.from(allLinks).map(edge=>{
+      const [src,tgt] = edge.split("->");
+      const srcNode = allNodes.get(src);
+      const tgtNode = allNodes.get(tgt);
+      let color = "#cccccc";
+      let semantic = false;
+      // semantic link if shared MeSH between these nodes
+      if(srcNode && tgtNode && srcNode.mesh && tgtNode.mesh){
+        const shared = srcNode.mesh.filter(x=>tgtNode.mesh.includes(x));
+        if(shared.length > 0){
+          color = "#66bb6a";
+          semantic = true;
+        }
+      }
+      return { source:src, target:tgt, color, semantic };
+    });
+
+    // Push to ForceGraph
+    rawData = { nodes, links };
+    window.rawData = rawData;
+    Graph.graphData(rawData);
+    initLinkStatesFromRaw();
+    Graph
+      .linkColor(l => l.semantic ? '#66bb6a' : '#cccccc')
+      .linkWidth(l => l.semantic ? 2 : 2)
+      .linkDirectionalParticles(l => l.semantic ? 2 : 0)
+      .linkDirectionalParticleSpeed(l => l.semantic ? 0.003 : 0.0);
+    Graph.refresh();
+
+    const total = nodes.length;
+    const shared = nodes.filter(n=>n.shared).length;
+    document.getElementById('hud-status').innerText =
+      `Fetched ${total} articles (${shared} shared). ${links.length} edges total.`;
+  }catch(e){
+    console.error('regen error', e);
+    document.getElementById('hud-status').innerText = 'Error regenerating graph (see console)';
+  }
+}
+
+// wire regen button
+const regenBtn = document.getElementById('regenBtn'); regenBtn.addEventListener('click', ()=>{ regenGraph(); });
+
+// hover behavior
+Graph.onNodeHover(node=>{ if(node) document.getElementById('portal-display').innerText = `${node.name}\n\n${node.summary||''}`; else document.getElementById('portal-display').innerText = ''; });
+
+// initialize
+initLinkStatesFromRaw();
+
+/********** Link hover + Node-title-overlay features (updated to face camera) **********/
+
+// helper to get stable src/tgt keys from a link object (works with object ids or strings)
+function srcTgtFromLinkObj(l){
+  const s = (typeof l.source === 'object') ? l.source.id : l.source;
+  const t = (typeof l.target === 'object') ? l.target.id : l.target;
+  return [String(s), String(t)];
+}
+
+// Highlight a link state when hovered (temporary visual)
+function setLinkHoverVisual(linkObj, on){
+  if(!linkObj) return;
+  const [src, tgt] = srcTgtFromLinkObj(linkObj);
+  const k1 = keyFor(src,tgt), k2 = keyFor(tgt,src);
+  [k1,k2].forEach(k=>{
+    const st = linkStates.get(k);
+    if(!st) return;
+    if(on){
+      if(st._hoverSaved === undefined){
+        st._hoverSaved = { colorA: st.colorA, colorB: st.colorB, opacity: st.opacity };
+      }
+      st.colorA = st.colorB = '#ffff66';
+    } else {
+      if(st._hoverSaved){
+        st.colorA = st._hoverSaved.colorA;
+        st.colorB = st._hoverSaved.colorB;
+        st.opacity = st._hoverSaved.opacity;
+        delete st._hoverSaved;
+      try{ if(!on){ if(linkObj && linkObj._origColor !== undefined){ linkObj.color = linkObj._origColor; delete linkObj._origColor; } try{ Graph.refresh(); }catch(e){} } }catch(e){}
+      }
+    }
+    rebuildTubeGeometry(st);
+  });
+}
+
+// add Graph link hover listener (uses existing ForceGraph API)
+const linkHoverEnabledCheckbox = document.getElementById('linkHoverToggle');
+const linkHoverEnabled = () => linkHoverEnabledCheckbox ? linkHoverEnabledCheckbox.checked : true;
+
+Graph.onLinkHover(link => {
+  if(!window.__prevHoveredLink) window.__prevHoveredLink = null;
+  if(window.__prevHoveredLink && (!link || (window.__prevHoveredLink !== link) )){
+    if(linkHoverEnabled()) setLinkHoverVisual(window.__prevHoveredLink, false);
+    window.__prevHoveredLink = null;
+  }
+  if(link && linkHoverEnabled()){
+    setLinkHoverVisual(link, true);
+    window.__prevHoveredLink = link;
+  }
+});
+
+// make cursor change when hovering a link (nice UX)
+Graph.onLinkHover(link => {
+  document.body.style.cursor = link ? 'pointer' : '';
+});
+
+// ------------- Title overlays on nodes (SpriteText) -------------
+const titleSprites = new Map(); // nodeId => { sprite, parent }
+
+function createTitleSpriteForNode(node){
+  try{
+    const SpriteText = window.SpriteText;
+    if(!SpriteText) return null;
+    const s = new SpriteText(node.name || '', 1);
+    s.material.depthTest = false; // ensure visible on top
+    s.renderOrder = 9999;
+    // initial scale and offset
+    s.scale.set(10, 4, 1);
+    s.position.set(0, (node.val || 12) / 8 + 0.9, 0);
+    s.userData._isTitleSprite = true;
+    return s;
+  }catch(e){ console.warn('createTitleSpriteForNode failed', e); return null; }
+}
+
+function attachTitleSprites(){
+  Graph.scene().traverse(obj=>{
+    if(obj.isMesh && obj.userData && obj.userData._nodeId){
+      const nid = String(obj.userData._nodeId);
+      if(titleSprites.has(nid)) return;
+      const node = getNodeById(nid);
+      if(!node) return;
+      const sprite = createTitleSpriteForNode(node);
+      if(!sprite) return;
+      obj.add(sprite);
+      titleSprites.set(nid, { sprite, parent: obj });
+    }
+  });
+}
+
+function detachTitleSprites(){
+  titleSprites.forEach((rec, nid)=>{
+    try{ if(rec.parent && rec.parent.remove) rec.parent.remove(rec.sprite); }catch(e){}
+  });
+  titleSprites.clear();
+}
+
+// toggle handler
+const titleOverlayToggle = document.getElementById('titleOverlayToggle');
+if(titleOverlayToggle){
+  titleOverlayToggle.addEventListener('change', (e)=>{
+    const on = !!e.target.checked;
+    if(on) attachTitleSprites();
+    else detachTitleSprites();
+  });
+}
+
+// helper to find the scene camera (cached)
+function getSceneCamera(){ if(window.__fg_camera) return window.__fg_camera; let cam = null; Graph.scene().traverse(o=>{ if(o.isCamera) cam = o; }); window.__fg_camera = cam; return cam; }
+
+// Keep title sprites facing the camera each engine tick — now scales with camera zoom/FOV
+Graph.onEngineTick(()=>{
+  if(titleOverlayToggle && titleOverlayToggle.checked){
+    const cam = getSceneCamera();
+    if(!cam) return;
+    titleSprites.forEach((rec, nid)=>{
+      try{
+        // world position of sprite (since sprite is child of node mesh, getWorldPosition)
+        const wp = new THREE.Vector3(); rec.sprite.getWorldPosition(wp);
+        // copy camera quaternion so sprite faces camera (billboard)
+        rec.sprite.quaternion.copy(cam.quaternion);
+
+        // compute distance from camera to sprite
+        const dist = cam.position.distanceTo(wp) || 1;
+
+        // Compute scale that responds to camera zoom / FOV:
+        // - For perspective cameras, as the camera gets closer (dist smaller) labels should scale down; we approximate a zoom by using FOV and distance.
+        // - For orthographic cameras, use cam.zoom directly.
+        const fovFactor = cam.fov ? (cam.fov / 60) : 1; // relative to 60deg baseline
+        const camZoom = cam.zoom || 1;
+
+        // base scale proportional to distance, modulated by FOV and inverse of zoom
+        let s = (dist / 40) * fovFactor / camZoom;
+        // clamp to reasonable range to avoid extremes
+        s = Math.max(0.5, Math.min(s, 6));
+
+        // apply scale (kept similar proportions to original code)
+        rec.sprite.scale.set(s * 10, s * 4, 1);
+      }catch(e){ /*ignore*/ }
+    });
+  }
+});
+
+// Ensure sprites are (re)attached when new nodes appear — attach if toggle enabled
+Graph.onEngineTick(()=>{
+  if(titleOverlayToggle && titleOverlayToggle.checked) attachTitleSprites();
+});
+
+Graph.onEngineTick(()=>{
+  if(titleOverlayToggle && titleOverlayToggle.checked) attachTitleSprites();
+});
+
+</script>
+
+<!-- Collapsible HUD wiring script -->
+<script>
+(function(){
+  const hud = document.getElementById('hud');
+  const btn = document.getElementById('hud-toggle');
+  if(!hud || !btn) return;
+  // restore state
+  const collapsed = localStorage.getItem('hudCollapsed') === '1';
+  if(collapsed) hud.classList.add('collapsed');
+  else hud.classList.remove('collapsed');
+  btn.setAttribute('aria-expanded', (!collapsed).toString());
+  // click toggles
+  btn.addEventListener('click', () => {
+    const isCollapsed = hud.classList.toggle('collapsed');
+    btn.setAttribute('aria-expanded', (!isCollapsed).toString());
+    localStorage.setItem('hudCollapsed', isCollapsed ? '1' : '0');
+  });
+  // double-click header to toggle (nice UX)
+  const header = hud.querySelector('.hud-header');
+  if(header) header.addEventListener('dblclick', () => btn.click());
+  // optional: collapse on small screens automatically
+  if(window.innerWidth < 680 && !collapsed){
+    hud.classList.add('collapsed'); localStorage.setItem('hudCollapsed', '1');
+  }
+})();
+</script>
+
+</body>
+</html>
